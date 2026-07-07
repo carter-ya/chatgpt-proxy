@@ -1,0 +1,113 @@
+import { useState, useCallback, useRef } from 'react';
+import { chat } from '../api/client';
+
+interface SendMessageParams {
+  message: string;
+  model: string;
+  conversationId?: string;
+  genId?: string;
+  onConversationCreated?: (id: string) => void;
+  onToken?: (token: string) => void;
+  onDone?: (fullMessage: string) => void;
+  onError?: (error: Error) => void;
+}
+
+interface UseChatReturn {
+  sending: boolean;
+  sendMessage: (params: SendMessageParams) => Promise<void>;
+  cancelStream: () => void;
+}
+
+export function useChat(): UseChatReturn {
+  const [sending, setSending] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const cancelStream = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setSending(false);
+  }, []);
+
+  const sendMessage = useCallback(async (params: SendMessageParams) => {
+    setSending(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      const response = await chat.sendMessage(
+        params.message,
+        params.model,
+        params.conversationId,
+        true,
+        params.genId,
+      );
+
+      if (controller.signal.aborted) return;
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem('token');
+          window.location.href = '/login';
+          return;
+        }
+        const text = await response.text().catch(() => '');
+        throw new Error(text || `HTTP ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let fullContent = '';
+      let buffer = '';
+
+      while (true) {
+        if (controller.signal.aborted) {
+          reader.cancel();
+          return;
+        }
+
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+
+          const data = trimmed.slice(6).trim();
+          if (data === '[DONE]') continue;
+
+          try {
+            const parsed = JSON.parse(data);
+
+            if (parsed.conversation_id && !params.conversationId) {
+              params.onConversationCreated?.(parsed.conversation_id);
+            }
+
+            if (parsed.content) {
+              fullContent += parsed.content;
+              params.onToken?.(fullContent);
+            }
+          } catch {
+            // skip unparseable chunks
+          }
+        }
+      }
+
+      params.onDone?.(fullContent);
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return;
+      params.onError?.(err instanceof Error ? err : new Error(String(err)));
+    } finally {
+      abortRef.current = null;
+      setSending(false);
+    }
+  }, []);
+
+  return { sending, sendMessage, cancelStream };
+}

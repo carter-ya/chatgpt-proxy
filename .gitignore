@@ -2,6 +2,7 @@
 !.cuneim/targets.json
 */.cuneim/*
 !*/.cuneim/targets.json
+package-manager-cache/
 
 # ---------- 二进制 ----------
 bin/

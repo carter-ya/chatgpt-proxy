@@ -39,11 +39,12 @@ func NewProxyHandler(client proxy.ProxyClient, sessionManager *session.Manager, 
 
 // conversationRequest is the expected JSON body for POST /api/conversation.
 type conversationRequest struct {
-	Message        string `json:"message"`
-	Model          string `json:"model"`
-	ConversationID string `json:"conversation_id"`
-	Stream         bool   `json:"stream"`
-	GenID          string `json:"gen_id"`
+	Message          string `json:"message"`
+	Model            string `json:"model"`
+	ConversationID   string `json:"conversation_id"`
+	Stream           bool   `json:"stream"`
+	GenID            string `json:"gen_id"`
+	AttachmentFileID string `json:"attachment_file_id"`
 }
 
 // Conversation handles POST /api/conversation.
@@ -127,10 +128,27 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 		return nil, "", err
 	}
 
+	// Build the user message — multimodal when attachment_file_id is present.
+	var userMessage map[string]interface{}
+	if reqBody.AttachmentFileID != "" {
+		userMessage = map[string]interface{}{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{"type": "text", "text": reqBody.Message},
+				{"type": "image_upload", "file_id": reqBody.AttachmentFileID},
+			},
+		}
+	} else {
+		userMessage = map[string]interface{}{
+			"role":    "user",
+			"content": reqBody.Message,
+		}
+	}
+
 	// Build the upstream request body.
 	upstreamBody := map[string]interface{}{
 		"action":          "next",
-		"messages":        []map[string]interface{}{{"role": "user", "content": reqBody.Message}},
+		"messages":        []map[string]interface{}{userMessage},
 		"model":           reqBody.Model,
 		"conversation_id": reqBody.ConversationID,
 		"stream":          reqBody.Stream,

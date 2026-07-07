@@ -5,18 +5,12 @@ export default defineConfig({
   plugins: [react()],
   server: {
     ...(process.env.PORT ? { port: Number(process.env.PORT) } : {}),
-    ...(process.env.VITE_API_TARGET
-      ? {
-          proxy: {
-            '/api': {
-              target: /\{port:.*\}/.test(process.env.VITE_API_TARGET)
-                ? `http://localhost:${process.env.BACKEND_PORT || process.env.XIAOMING_SERVER_PORT || 8080}`
-                : process.env.VITE_API_TARGET,
-              changeOrigin: true,
-            },
-          },
-        }
-      : {}),
+    proxy: {
+      '/api': {
+        target: `http://localhost:${process.env.XIAOMING_SERVER_PORT || 8080}`,
+        changeOrigin: true,
+      },
+    },
   },
   build: {
     outDir: 'dist',

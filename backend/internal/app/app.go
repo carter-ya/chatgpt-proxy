@@ -57,7 +57,7 @@ func New(cfg *config.Config) (*App, error) {
 		return nil, fmt.Errorf("初始化 session manager 失败: %w", err)
 	}
 	proxyClient := proxy.NewProxyClient(cfg.ChatGPTBaseURL, sentinelCache)
-	proxyHandler := handler.NewProxyHandler(proxyClient, sessionManager)
+	proxyHandler := handler.NewProxyHandler(proxyClient, sessionManager, queries)
 
 	engine := gin.New()
 	engine.Use(gin.Recovery(), gin.Logger())

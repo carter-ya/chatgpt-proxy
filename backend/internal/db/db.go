@@ -37,6 +37,13 @@ func New(db DBTX) *Queries {
 	return &Queries{db: db}
 }
 
+// Conversation represents a row in the conversations table.
+type Conversation struct {
+	ID     string
+	UserID string
+	Title  string
+}
+
 type CreateUserParams struct {
 	Email          string
 	HashedPassword string
@@ -88,4 +95,44 @@ func (q *Queries) UpdateSessionTokenStatus(ctx context.Context, id string, statu
 	const sql = `UPDATE session_tokens SET status = $1, updated_at = NOW() WHERE id = $2`
 	_, err := q.db.Exec(ctx, sql, status, id)
 	return err
+}
+
+// CreateConversation inserts a new conversation row. Uses ON CONFLICT DO NOTHING
+// to safely handle cases where the conversation already exists.
+func (q *Queries) CreateConversation(ctx context.Context, id, userID, title string) error {
+	const sql = `INSERT INTO conversations (id, user_id, title) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`
+	_, err := q.db.Exec(ctx, sql, id, userID, title)
+	return err
+}
+
+// GetConversationByID returns a conversation by its id.
+// Returns a zero-value Conversation and an error (pgx.ErrNoRows) if not found.
+func (q *Queries) GetConversationByID(ctx context.Context, id string) (Conversation, error) {
+	const sql = `SELECT id, user_id, title FROM conversations WHERE id = $1`
+	var c Conversation
+	err := q.db.QueryRow(ctx, sql, id).Scan(&c.ID, &c.UserID, &c.Title)
+	return c, err
+}
+
+// ListConversationIDsByUser returns all conversation IDs owned by the given user.
+func (q *Queries) ListConversationIDsByUser(ctx context.Context, userID string) ([]string, error) {
+	const sql = `SELECT id FROM conversations WHERE user_id = $1`
+	rows, err := q.db.Query(ctx, sql, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }

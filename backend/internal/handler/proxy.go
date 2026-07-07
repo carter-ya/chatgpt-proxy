@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	"chatgpt-proxy/backend/internal/db"
 	"chatgpt-proxy/backend/internal/httpresp"
 	"chatgpt-proxy/backend/internal/proxy"
 	"chatgpt-proxy/backend/internal/session"
@@ -23,13 +24,15 @@ import (
 type ProxyHandler struct {
 	client         proxy.ProxyClient
 	sessionManager *session.Manager
+	queries        *db.Queries
 }
 
 // NewProxyHandler creates a new ProxyHandler.
-func NewProxyHandler(client proxy.ProxyClient, sessionManager *session.Manager) *ProxyHandler {
+func NewProxyHandler(client proxy.ProxyClient, sessionManager *session.Manager, queries *db.Queries) *ProxyHandler {
 	return &ProxyHandler{
 		client:         client,
 		sessionManager: sessionManager,
+		queries:        queries,
 	}
 }
 
@@ -261,14 +264,194 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 }
 
 // ListConversations handles GET /api/conversations.
+// Proxies to upstream, then filters the response to only include conversations
+// owned by the current authenticated user. Auto-registers new conversations.
 func (h *ProxyHandler) ListConversations(c *gin.Context) {
-	h.proxyGet(c, "/backend-api/conversations")
+	ctx := c.Request.Context()
+
+	// Extract authenticated user ID from context.
+	userID, _ := c.Get("user_id")
+	userIDStr, ok := userID.(string)
+	if !ok || userIDStr == "" {
+		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
+
+	tokenValue, err := h.sessionManager.GetActiveToken(ctx)
+	if err != nil {
+		if errors.Is(err, session.ErrNoActiveToken) {
+			httpresp.Error(c, http.StatusServiceUnavailable, "所有 session token 均已失效，请稍后重试")
+			return
+		}
+		httpresp.Error(c, http.StatusInternalServerError, "获取 session token 失败")
+		return
+	}
+
+	upstreamPath := "/backend-api/conversations"
+	req, err := h.client.BuildRequest(ctx, http.MethodGet, upstreamPath, tokenValue, nil, "application/json")
+	if err != nil {
+		httpresp.Error(c, http.StatusInternalServerError, "构建代理请求失败")
+		return
+	}
+
+	resp, err := h.client.Do(req)
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, "上游请求失败")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		log.Printf("[Proxy] token 已失效 token_prefix=%.8s...", tokenValue[:min(8, len(tokenValue))])
+		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
+		if findErr == nil && token != nil {
+			_ = h.sessionManager.MarkTokenExpired(ctx, token.ID)
+		}
+		httpresp.Error(c, http.StatusServiceUnavailable, "session token 已失效")
+		return
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, "读取上游响应失败")
+		return
+	}
+
+	if !json.Valid(body) {
+		log.Printf("[Proxy] 非 JSON 响应 (ListConversations) status=%d body_prefix=%.200s", resp.StatusCode, string(body))
+		c.String(http.StatusBadGateway, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
+		return
+	}
+
+	// Filter upstream response by conversation ownership.
+	filtered, filterErr := h.filterConversationsByOwner(ctx, body, userIDStr)
+	if filterErr != nil {
+		log.Printf("[Proxy] ListConversations 过滤失败: %v，返回原始上游响应", filterErr)
+		c.Data(resp.StatusCode, "application/json", body)
+		return
+	}
+
+	c.Data(resp.StatusCode, "application/json", filtered)
 }
 
 // GetConversation handles GET /api/conversations/:id.
+// Checks local conversation ownership before proxying. Returns 403 if the
+// conversation belongs to a different user. Auto-registers on first access.
 func (h *ProxyHandler) GetConversation(c *gin.Context) {
-	id := c.Param("id")
-	h.proxyGet(c, "/backend-api/conversations/"+id)
+	ctx := c.Request.Context()
+	convID := c.Param("id")
+
+	// Extract authenticated user ID from context.
+	userID, _ := c.Get("user_id")
+	userIDStr, ok := userID.(string)
+	if !ok || userIDStr == "" {
+		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
+
+	// Check local conversation ownership.
+	conv, err := h.queries.GetConversationByID(ctx, convID)
+	if err == nil {
+		// Conversation exists locally — check ownership.
+		if conv.UserID != userIDStr {
+			httpresp.Error(c, http.StatusForbidden, "无权访问该对话")
+			return
+		}
+		// Owned by current user — proceed to proxy.
+	} else {
+		// Not found locally — auto-register and proceed.
+		log.Printf("[Proxy] GetConversation: 自动注册对话 convID=%s userID=%s", convID, userIDStr)
+		if regErr := h.queries.CreateConversation(ctx, convID, userIDStr, ""); regErr != nil {
+			log.Printf("[Proxy] GetConversation: 自动注册失败 convID=%s err=%v", convID, regErr)
+		}
+	}
+
+	h.proxyGet(c, "/backend-api/conversations/"+convID)
+}
+
+// filterConversationsByOwner takes the raw upstream JSON response body,
+// extracts conversation IDs from the "items" array, cross-references with
+// the local DB, auto-registers new conversations, and returns a filtered
+// JSON response containing only conversations owned by the given user.
+func (h *ProxyHandler) filterConversationsByOwner(ctx context.Context, body []byte, userID string) ([]byte, error) {
+	var response map[string]interface{}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("解析上游响应失败: %w", err)
+	}
+
+	// Extract the items array.
+	rawItems, ok := response["items"]
+	if !ok {
+		return nil, fmt.Errorf("上游响应缺少 items 字段")
+	}
+	items, ok := rawItems.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("上游响应的 items 字段不是数组")
+	}
+
+	if len(items) == 0 {
+		return body, nil
+	}
+
+	// Extract IDs from upstream items and their titles.
+	type upstreamConv struct {
+		id    string
+		title string
+	}
+	var upstream []upstreamConv
+	for _, item := range items {
+		obj, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := obj["id"].(string)
+		if id == "" {
+			continue
+		}
+		title, _ := obj["title"].(string)
+		upstream = append(upstream, upstreamConv{id: id, title: title})
+	}
+
+	// Build a set of conversation IDs owned by the current user.
+	ownedIDs, err := h.queries.ListConversationIDsByUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("查询用户对话失败: %w", err)
+	}
+	ownedSet := make(map[string]bool, len(ownedIDs))
+	for _, id := range ownedIDs {
+		ownedSet[id] = true
+	}
+
+	// Auto-register any upstream conversations not yet in the local DB.
+	for _, uc := range upstream {
+		if !ownedSet[uc.id] {
+			if regErr := h.queries.CreateConversation(ctx, uc.id, userID, uc.title); regErr != nil {
+				log.Printf("[Proxy] filterConversationsByOwner: 自动注册失败 convID=%s err=%v", uc.id, regErr)
+			} else {
+				ownedSet[uc.id] = true
+			}
+		}
+	}
+
+	// Filter items to only owned conversations.
+	filtered := make([]interface{}, 0, len(items))
+	for _, item := range items {
+		obj, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := obj["id"].(string)
+		if ownedSet[id] {
+			filtered = append(filtered, item)
+		}
+	}
+
+	response["items"] = filtered
+	result, err := json.Marshal(response)
+	if err != nil {
+		return nil, fmt.Errorf("序列化过滤后的响应失败: %w", err)
+	}
+	return result, nil
 }
 
 // UpdateConversation handles PATCH /api/conversations/:id.

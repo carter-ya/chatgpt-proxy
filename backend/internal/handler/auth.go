@@ -3,8 +3,8 @@ package handler
 import (
 	"net/http"
 
-	"chatgpt-proxy/internal/auth"
-	"chatgpt-proxy/internal/httpresp"
+	"chatgpt-proxy/backend/internal/auth"
+	"chatgpt-proxy/backend/internal/httpresp"
 
 	"github.com/gin-gonic/gin"
 )

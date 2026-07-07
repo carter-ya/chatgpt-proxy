@@ -9,11 +9,11 @@ import (
 	"syscall"
 	"time"
 
-	"chatgpt-proxy/internal/auth"
-	"chatgpt-proxy/internal/config"
-	"chatgpt-proxy/internal/db"
-	"chatgpt-proxy/internal/handler"
-	"chatgpt-proxy/internal/httpresp"
+	"chatgpt-proxy/backend/internal/auth"
+	"chatgpt-proxy/backend/internal/config"
+	"chatgpt-proxy/backend/internal/db"
+	"chatgpt-proxy/backend/internal/handler"
+	"chatgpt-proxy/backend/internal/httpresp"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"

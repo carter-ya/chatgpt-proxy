@@ -1,46 +1,48 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"path/filepath"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/exc-works/migrate"
 )
 
 // RunMigrations reads SQL migration files from the migrations directory and
 // executes them against the given PostgreSQL database.
 func RunMigrations(dbURL string) error {
+	ctx := context.Background()
+
 	db, err := sql.Open("pgx", dbURL)
 	if err != nil {
 		return fmt.Errorf("open migration db: %w", err)
 	}
 	defer db.Close()
 
-	driver, err := postgres.WithInstance(db, &postgres.Config{})
-	if err != nil {
-		return fmt.Errorf("create migration driver: %w", err)
-	}
-
 	absDir, err := filepath.Abs("migrations")
 	if err != nil {
 		return fmt.Errorf("resolve migrations dir: %w", err)
 	}
 
-	m, err := migrate.NewWithDatabaseInstance(
-		"file://"+absDir,
-		"postgres",
-		driver,
-	)
+	svc, err := migrate.NewService(ctx, migrate.Config{
+		Dialect:         migrate.NewPostgresDialect(),
+		DB:              db,
+		MigrationSource: migrate.DirectorySource{Directory: absDir},
+		SchemaName:      "migration_schema",
+		Logger:          migrate.NoopLogger{},
+	})
 	if err != nil {
 		return fmt.Errorf("create migrator: %w", err)
 	}
 
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+	if err := svc.Create(); err != nil {
+		return fmt.Errorf("create schema history: %w", err)
+	}
+
+	if err := svc.Up(); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
 	}
 

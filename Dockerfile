@@ -1,5 +1,7 @@
 # 构建阶段
-FROM golang:1.25 AS builder
+FROM golang:1.25-alpine AS builder
+
+RUN apk add --no-cache git
 
 WORKDIR /build
 

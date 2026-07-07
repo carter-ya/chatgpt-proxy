@@ -1,8 +1,8 @@
 package app
 
 import (
-	"chatgpt-proxy/internal/handler"
-	"chatgpt-proxy/internal/middleware"
+	"chatgpt-proxy/backend/internal/handler"
+	"chatgpt-proxy/backend/internal/middleware"
 
 	"github.com/gin-gonic/gin"
 )

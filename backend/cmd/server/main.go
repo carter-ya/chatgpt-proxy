@@ -5,8 +5,8 @@ package main
 import (
 	"log"
 
-	"chatgpt-proxy/internal/app"
-	"chatgpt-proxy/internal/config"
+	"chatgpt-proxy/backend/internal/app"
+	"chatgpt-proxy/backend/internal/config"
 )
 
 func main() {

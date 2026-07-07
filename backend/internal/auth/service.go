@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"time"
 
-	"chatgpt-proxy/internal/db"
+	"chatgpt-proxy/backend/internal/db"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgconn"

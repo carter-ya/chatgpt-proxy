@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -55,6 +56,10 @@ func StreamSSE(c *gin.Context, resp *http.Response) error {
 				if errors.Is(scanErr, io.EOF) {
 					return nil
 				}
+				// Send SSE error event to client before closing.
+				fmt.Fprintf(c.Writer, "event: error\ndata: SSE 流读取中断\n\n")
+				flusher.Flush()
+				log.Printf("[SSE] 上游流读取中断 (非 EOF): %v", scanErr)
 				return fmt.Errorf("SSE 流读取错误: %w", scanErr)
 			}
 

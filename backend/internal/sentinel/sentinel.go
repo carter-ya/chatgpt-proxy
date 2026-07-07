@@ -154,6 +154,33 @@ func fetchSentinelTokens(ctx context.Context, baseURL string, cfClearance string
 	nonce, answer := solvePoW(prepData.ProofOfWork.Seed, difficulty)
 
 	// Step 3: finalize
+	//
+	// cf_clearance 清除级别说明：
+	// Cloudflare 提供三种 cf_clearance 清除级别，层次关系为：
+	//   Interactive（交互式，最高级）> Managed（托管）> Non-Interactive（非交互式）
+	// 当前实现硬编码使用 interactive 级别，所有 chatgpt.com 请求共享同一 cookie。
+	// 当后端返回的 cf_clearance 级别不足（如 challenge 页面仍出现）时，应自动触发
+	// 重新获取 sentinel token 以获得新的 cf_clearance cookie。
+	//
+	// cf_clearance 设备绑定说明：
+	// cf_clearance cookie 与获取时的访问者/设备绑定，不可跨机器复用。
+	// 当前单机部署架构天然满足同一设备的要求；若扩展为多机部署，每台服务器
+	// 需独立获取自己的 cf_clearance cookie，不可共享。
+	//
+	// Turnstile 门控：仅当上游 prepare 响应要求 Turnstile 验证时才组装 turnstile 字段；
+	// 若 Required=false，finalize 请求中 turnstile 应为零值结构体。
+	var turnstile turnstileBody
+	if prepData.Turnstile.Required {
+		turnstile = turnstileBody{
+			Token:     "cftoken",
+			Iframe:    false,
+			Challenge: "",
+			Response:  "AAAA",
+			Action:    "response",
+			Theme:     "dark",
+		}
+	}
+
 	finBody := finalizeRequest{
 		PrepareToken: prepData.PrepareToken,
 		ProofOfWork: proofOfWorkBody{
@@ -161,14 +188,7 @@ func fetchSentinelTokens(ctx context.Context, baseURL string, cfClearance string
 			Difficulty: prepData.ProofOfWork.Difficulty,
 			Answer:     answer,
 		},
-		Turnstile: turnstileBody{
-			Token:     "cftoken",
-			Iframe:    false,
-			Challenge: "",
-			Response:  "AAAA",
-			Action:    "response",
-			Theme:     "dark",
-		},
+		Turnstile: turnstile,
 	}
 	finJSON, err := json.Marshal(finBody)
 	if err != nil {

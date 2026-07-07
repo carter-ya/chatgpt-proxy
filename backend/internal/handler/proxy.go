@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"strings"
@@ -81,6 +82,7 @@ func (h *ProxyHandler) Conversation(c *gin.Context) {
 
 		// Check if response is valid JSON (not Cloudflare challenge HTML).
 		if !json.Valid(body) {
+			log.Printf("[Proxy] 非 JSON 响应 (Conversation 非流式) status=%d body_prefix=%.200s", resp.StatusCode, string(body))
 			c.String(http.StatusBadGateway, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
 			return
 		}
@@ -241,6 +243,7 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 
 	// Check for non-JSON response (Cloudflare challenge).
 	if !json.Valid(body) {
+		log.Printf("[Proxy] 非 JSON 响应 (UploadFile) status=%d body_prefix=%.200s", resp.StatusCode, string(body))
 		c.String(http.StatusBadGateway, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
 		return
 	}
@@ -308,6 +311,7 @@ func (h *ProxyHandler) proxyGet(c *gin.Context, upstreamPath string) {
 	}
 
 	if !json.Valid(body) {
+		log.Printf("[Proxy] 非 JSON 响应 (proxyGet) path=%s status=%d body_prefix=%.200s", upstreamPath, resp.StatusCode, string(body))
 		c.String(http.StatusBadGateway, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
 		return
 	}
@@ -364,6 +368,7 @@ func (h *ProxyHandler) proxyWithBody(c *gin.Context, method, upstreamPath string
 	}
 
 	if !json.Valid(body) {
+		log.Printf("[Proxy] 非 JSON 响应 (proxyWithBody) path=%s status=%d body_prefix=%.200s", upstreamPath, resp.StatusCode, string(body))
 		c.String(http.StatusBadGateway, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
 		return
 	}

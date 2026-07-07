@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, type KeyboardEvent, type ChangeEvent } f
 import { chat } from '../api/client';
 
 interface ChatInputProps {
-  onSend: (text: string, model: string, genId?: string) => void;
+  onSend: (text: string, model: string, genId?: string, attachmentFileId?: string) => void;
   sending: boolean;
   onCancel: () => void;
 }
@@ -10,7 +10,8 @@ interface ChatInputProps {
 export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps) {
   const [text, setText] = useState('');
   const [uploading, setUploading] = useState(false);
-  const [genId, setGenId] = useState<string | undefined>(undefined);
+  const [genId] = useState<string | undefined>(undefined);
+  const [attachmentFileId, setAttachmentFileId] = useState<string | undefined>(undefined);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -25,13 +26,13 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
   const handleSend = useCallback(() => {
     const trimmed = text.trim();
     if (!trimmed || sending) return;
-    onSend(trimmed, 'gpt-4o', genId);
+    onSend(trimmed, 'gpt-4o', genId, attachmentFileId);
     setText('');
-    setGenId(undefined);
+    setAttachmentFileId(undefined);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [text, sending, genId, onSend]);
+  }, [text, sending, genId, attachmentFileId, onSend]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -60,7 +61,7 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
     setUploading(true);
     try {
       const result = await chat.uploadFile(file);
-      setGenId(result.file_id);
+      setAttachmentFileId(result.file_id);
     } catch {
       alert('图片上传失败');
     } finally {
@@ -70,13 +71,13 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
 
   return (
     <>
-      {genId && (
+      {attachmentFileId && (
         <div className="file-preview">
           <span className="file-preview-item">
             📎 已附加图片
             <button
               className="remove-file"
-              onClick={() => setGenId(undefined)}
+              onClick={() => setAttachmentFileId(undefined)}
               aria-label="移除图片"
             >
               ×

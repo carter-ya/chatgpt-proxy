@@ -6,6 +6,7 @@ interface SendMessageParams {
   model: string;
   conversationId?: string;
   genId?: string;
+  attachmentFileId?: string;
   onConversationCreated?: (id: string) => void;
   onToken?: (token: string) => void;
   onDone?: (fullMessage: string) => void;
@@ -40,6 +41,7 @@ export function useChat(): UseChatReturn {
         params.conversationId,
         true,
         params.genId,
+        params.attachmentFileId,
       );
 
       if (controller.signal.aborted) return;
@@ -89,6 +91,24 @@ export function useChat(): UseChatReturn {
               params.onConversationCreated?.(parsed.conversation_id);
             }
 
+            if (parsed.content) {
+              fullContent += parsed.content;
+              params.onToken?.(fullContent);
+            }
+          } catch {
+            // skip unparseable chunks
+          }
+        }
+      }
+
+      // Process any remaining data in the buffer after stream ends
+      buffer += decoder.decode();
+      const remaining = buffer.trim();
+      if (remaining.startsWith('data: ')) {
+        const data = remaining.slice(6).trim();
+        if (data !== '[DONE]') {
+          try {
+            const parsed = JSON.parse(data);
             if (parsed.content) {
               fullContent += parsed.content;
               params.onToken?.(fullContent);

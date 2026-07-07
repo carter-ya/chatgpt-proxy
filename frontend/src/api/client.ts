@@ -69,6 +69,7 @@ export const chat = {
     conversationId?: string,
     stream = true,
     genId?: string,
+    attachmentFileId?: string,
   ) => {
     return fetch(`${API_BASE}/conversation`, {
       method: 'POST',
@@ -79,6 +80,7 @@ export const chat = {
         conversation_id: conversationId,
         stream,
         gen_id: genId,
+        attachment_file_id: attachmentFileId,
       }),
     });
   },
@@ -86,20 +88,8 @@ export const chat = {
   uploadFile: async (file: File): Promise<{ file_id: string; url: string }> => {
     const formData = new FormData();
     formData.append('file', file);
-    const token = localStorage.getItem('token');
-    const headers: Record<string, string> = {};
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    const res = await fetch(`${API_BASE}/files`, {
-      method: 'POST',
-      headers,
-      body: formData,
-    });
-    if (!res.ok) {
-      throw new Error(`Upload failed: ${res.status}`);
-    }
-    return res.json();
+    const res = await apiClient.post<{ file_id: string; url: string }>('/files', formData);
+    return res.data;
   },
 
   listConversations: () =>

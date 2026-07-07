@@ -84,7 +84,7 @@ export default function ChatPage() {
   }, [navigate]);
 
   const handleSend = useCallback(
-    async (text: string, model: string, genId?: string) => {
+    async (text: string, model: string, genId?: string, attachmentFileId?: string) => {
       const userMsg: LocalMessage = {
         id: `user-${Date.now()}`,
         role: 'user',
@@ -107,6 +107,7 @@ export default function ChatPage() {
         model,
         conversationId: activeConversationId || undefined,
         genId: genId || undefined,
+        attachmentFileId: attachmentFileId || undefined,
         onConversationCreated: (newConvId) => {
           setActiveConversationId(newConvId);
           navigate(`/chat/${newConvId}`, { replace: true });

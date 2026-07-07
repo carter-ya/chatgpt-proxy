@@ -45,6 +45,7 @@ type conversationRequest struct {
 	Stream           bool   `json:"stream"`
 	GenID            string `json:"gen_id"`
 	AttachmentFileID string `json:"attachment_file_id"`
+	WebSearch        bool   `json:"web_search"`
 }
 
 // Conversation handles POST /api/conversation.
@@ -155,6 +156,9 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 	}
 	if reqBody.GenID != "" {
 		upstreamBody["gen_id"] = reqBody.GenID
+	}
+	if reqBody.WebSearch {
+		upstreamBody["webslap"] = true
 	}
 
 	bodyJSON, err := json.Marshal(upstreamBody)

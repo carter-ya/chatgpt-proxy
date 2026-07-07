@@ -21,3 +21,4 @@ backend/internal/db/db.go
 backend/internal/db/models.go
 backend/internal/db/querier.go
 backend/internal/db/*.sql.go
+logs/

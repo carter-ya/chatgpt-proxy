@@ -2,3 +2,19 @@
 !.cuneim/targets.json
 */.cuneim/*
 !*/.cuneim/targets.json
+
+# ---------- 二进制 ----------
+bin/
+
+# ---------- 依赖 ----------
+node_modules/
+
+# ---------- 构建产物 ----------
+dist/
+
+# ---------- 环境变量 ----------
+.env
+
+# ---------- 代码生成 ----------
+internal/db/*.go
+internal/*/*_enum.go

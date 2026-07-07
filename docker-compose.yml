@@ -1,0 +1,23 @@
+services:
+  backend:
+    build: .
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    env_file:
+      - .env
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: chatgpt_proxy
+      POSTGRES_PASSWORD: dev_secret
+      POSTGRES_DB: chatgpt_proxy
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:

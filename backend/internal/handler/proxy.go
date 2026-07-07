@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"time"
 
 	"chatgpt-proxy/backend/internal/db"
 	"chatgpt-proxy/backend/internal/httpresp"
@@ -63,6 +64,11 @@ func (h *ProxyHandler) Conversation(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
+	// Wrap with overall timeout to ensure user-facing response <60s
+	// even if sentinel fetch adds latency (R-1.15).
+	ctx, cancel := context.WithTimeout(ctx, 55*time.Second)
+	defer cancel()
+
 	// Get an active token and attempt the request with retry on 401/403.
 	resp, tokenValue, err := h.doConversationWithRetry(ctx, reqBody, userID)
 	if err != nil {
@@ -86,7 +92,7 @@ func (h *ProxyHandler) Conversation(c *gin.Context) {
 		// Check if response is valid JSON (not Cloudflare challenge HTML).
 		if !json.Valid(body) {
 			log.Printf("[Proxy] 非 JSON 响应 (Conversation 非流式) status=%d body_prefix=%.200s", resp.StatusCode, string(body))
-			c.String(http.StatusBadGateway, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
+			c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
 			return
 		}
 
@@ -95,6 +101,12 @@ func (h *ProxyHandler) Conversation(c *gin.Context) {
 	}
 
 	// Handle SSE streaming.
+	// Gate: reject non-event-stream responses before streaming (R-1.14).
+	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		log.Printf("[Proxy] 非 JSON 响应 (Conversation 流式) status=%d content_type=%s", resp.StatusCode, resp.Header.Get("Content-Type"))
+		c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
+		return
+	}
 	if err := proxy.StreamSSE(c, resp); err != nil {
 		// SSE streaming errors are logged but the response may already be partially sent.
 		log.Printf("[Proxy] SSE 流异常: %v", err)
@@ -262,7 +274,7 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 	// Check for non-JSON response (Cloudflare challenge).
 	if !json.Valid(body) {
 		log.Printf("[Proxy] 非 JSON 响应 (UploadFile) status=%d body_prefix=%.200s", resp.StatusCode, string(body))
-		c.String(http.StatusBadGateway, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
 		return
 	}
 
@@ -325,7 +337,7 @@ func (h *ProxyHandler) ListConversations(c *gin.Context) {
 
 	if !json.Valid(body) {
 		log.Printf("[Proxy] 非 JSON 响应 (ListConversations) status=%d body_prefix=%.200s", resp.StatusCode, string(body))
-		c.String(http.StatusBadGateway, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
 		return
 	}
 
@@ -511,7 +523,7 @@ func (h *ProxyHandler) proxyGet(c *gin.Context, upstreamPath string) {
 
 	if !json.Valid(body) {
 		log.Printf("[Proxy] 非 JSON 响应 (proxyGet) path=%s status=%d body_prefix=%.200s", upstreamPath, resp.StatusCode, string(body))
-		c.String(http.StatusBadGateway, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
 		return
 	}
 
@@ -569,7 +581,7 @@ func (h *ProxyHandler) proxyWithBody(c *gin.Context, method, upstreamPath string
 
 	if !json.Valid(body) {
 		log.Printf("[Proxy] 非 JSON 响应 (proxyWithBody) path=%s status=%d body_prefix=%.200s", upstreamPath, resp.StatusCode, string(body))
-		c.String(http.StatusBadGateway, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
+		c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
 		return
 	}
 

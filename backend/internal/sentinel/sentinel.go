@@ -111,7 +111,7 @@ type finalizeResponse struct {
 
 // fetchSentinelTokens executes the full sentinel flow: prepare → PoW → finalize.
 func fetchSentinelTokens(ctx context.Context, baseURL string, cfClearance string) (*SentinelTokens, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second}
 
 	// Step 1: prepare
 	prepBody := prepareRequest{Persona: "chatgpt-freeaccount"}

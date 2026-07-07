@@ -21,3 +21,8 @@ func Error(c *gin.Context, status int, message string) {
 func StatusText(c *gin.Context, s string) {
 	c.JSON(http.StatusOK, gin.H{"status": s})
 }
+
+// StatusOK 以 200 状态码返回 data 的 JSON 响应。
+func StatusOK(c *gin.Context, data interface{}) {
+	Success(c, http.StatusOK, data)
+}

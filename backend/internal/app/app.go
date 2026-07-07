@@ -1,48 +1,66 @@
-// Package app 提供应用装配：路由注册、中间件挂载、服务启动。
 package app
 
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"chatgpt-proxy/backend/internal/config"
-	"chatgpt-proxy/backend/internal/httpresp"
+	"chatgpt-proxy/internal/auth"
+	"chatgpt-proxy/internal/config"
+	"chatgpt-proxy/internal/db"
+	"chatgpt-proxy/internal/handler"
+	"chatgpt-proxy/internal/httpresp"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// App 持有 gin 引擎和配置。
 type App struct {
-	engine *gin.Engine
 	cfg    *config.Config
+	engine *gin.Engine
+	pool   *pgxpool.Pool
 }
 
-// New 创建 App 实例，注册基础路由和中间件。
-func New(cfg *config.Config) *App {
-	engine := gin.New()
+func New(cfg *config.Config) (*App, error) {
+	pool, err := pgxpool.New(context.Background(), "")
+	if err != nil {
+		return nil, err
+	}
 
-	// 中间件：panic recovery、请求日志、CORS
+	queries := db.New(pool)
+
+	authSvc := auth.NewService(queries, cfg.JWTSecret, cfg.JWTExpiration)
+	if cfg.JWTExpiration == 0 {
+		authSvc = auth.NewService(queries, cfg.JWTSecret, 24*time.Hour)
+	}
+
+	authHandler := handler.NewAuthHandler(authSvc)
+
+	engine := gin.New()
 	engine.Use(gin.Recovery(), gin.Logger())
 	engine.Use(cors.Default())
 
-	app := &App{engine: engine, cfg: cfg}
+	api := engine.Group("/api")
+	api.GET("/health", health)
+	RegisterAuthRoutes(api, authHandler)
+	RegisterProtectedRoutes(api, cfg.JWTSecret)
 
-	// 健康检查
-	engine.GET("/api/health", app.health)
-
-	// 预留路由注册点，后续 worker 在此挂载路由组
-	// auth := engine.Group("/api/auth")
-	// proxy := engine.Group("/api")
-
-	return app
+	return &App{
+		cfg:    cfg,
+		engine: engine,
+		pool:   pool,
+	}, nil
 }
 
-// Run 启动 HTTP 服务，监听配置端口，支持优雅关闭。
+func (a *App) Engine() *gin.Engine {
+	return a.engine
+}
+
 func (a *App) Run() error {
 	addr := fmt.Sprintf(":%d", a.cfg.ServerPort)
 	srv := &http.Server{
@@ -50,7 +68,6 @@ func (a *App) Run() error {
 		Handler: a.engine,
 	}
 
-	// 优雅关闭：监听 SIGINT / SIGTERM
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -67,6 +84,21 @@ func (a *App) Run() error {
 	return nil
 }
 
-func (a *App) health(c *gin.Context) {
-	httpresp.StatusText(c, "ok")
+func (a *App) Close() {
+	if a.pool != nil {
+		a.pool.Close()
+	}
+}
+
+func health(c *gin.Context) {
+	httpresp.StatusOK(c, gin.H{"status": "ok"})
+}
+
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+)
+
+func PrintBanner() {
+	log.Printf("chatgpt-proxy %s (built at %s)", Version, BuildTime)
 }

@@ -28,7 +28,7 @@ func NewService(queries *db.Queries, jwtSecret string, jwtExpiration time.Durati
 	}
 }
 
-func (s *Service) Register(ctx context.Context, email, password string) (*UserResponse, error) {
+func (s *Service) Register(ctx context.Context, email, password string) (*LoginResponse, error) {
 	if !emailRegex.MatchString(email) {
 		return nil, ErrInvalidInput
 	}
@@ -52,7 +52,15 @@ func (s *Service) Register(ctx context.Context, email, password string) (*UserRe
 		return nil, err
 	}
 
-	return &UserResponse{ID: user.ID, Email: user.Email}, nil
+	token, err := s.generateJWT(user.ID, user.Email)
+	if err != nil {
+		return nil, err
+	}
+
+	return &LoginResponse{
+		Token: token,
+		User:  UserResponse{ID: user.ID, Email: user.Email},
+	}, nil
 }
 
 func (s *Service) Login(ctx context.Context, email, password string) (*LoginResponse, error) {

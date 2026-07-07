@@ -152,15 +152,18 @@ func TestRegister_Success(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var resp auth.UserResponse
+	var resp auth.LoginResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
-	if resp.Email != "test@example.com" {
-		t.Errorf("expected email 'test@example.com', got '%s'", resp.Email)
+	if resp.User.Email != "test@example.com" {
+		t.Errorf("expected email 'test@example.com', got '%s'", resp.User.Email)
 	}
-	if resp.ID != "00000000-0000-0000-0000-000000000001" {
-		t.Errorf("expected ID '00000000-0000-0000-0000-000000000001', got '%s'", resp.ID)
+	if resp.User.ID != "00000000-0000-0000-0000-000000000001" {
+		t.Errorf("expected ID '00000000-0000-0000-0000-000000000001', got '%s'", resp.User.ID)
+	}
+	if resp.Token == "" {
+		t.Error("expected non-empty token in register response")
 	}
 }
 

@@ -1,3 +1,11 @@
+export function getAvatarLetter(email?: string): string {
+  if (!email) return '?';
+  for (const ch of email) {
+    if (/[a-zA-Z]/.test(ch)) return ch.toUpperCase();
+  }
+  return '?';
+}
+
 export function formatTime(dateStr: string): string {
   const date = new Date(dateStr);
   const now = new Date();
@@ -29,7 +37,7 @@ export function extractImages(
     urls.push(match[1]);
   }
   // Match raw image URLs from known CDN
-  const urlRegex = /https?:\/\/[^\s"'<>]+\.(?:png|jpg|jpeg|gif|webp)/gi;
+  const urlRegex = /https?:\/\/[^\s"'<>]+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s"'<>]*)?|https?:\/\/files\.oaiusercontent\.com\/[^\s"'<>]+/gi;
   while ((match = urlRegex.exec(content)) !== null) {
     if (!urls.includes(match[0])) {
       urls.push(match[0]);

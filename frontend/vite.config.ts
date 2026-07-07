@@ -4,13 +4,17 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5173,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8080',
-        changeOrigin: true,
-      },
-    },
+    ...(process.env.PORT ? { port: Number(process.env.PORT) } : {}),
+    ...(process.env.VITE_API_TARGET
+      ? {
+          proxy: {
+            '/api': {
+              target: process.env.VITE_API_TARGET,
+              changeOrigin: true,
+            },
+          },
+        }
+      : {}),
   },
   build: {
     outDir: 'dist',

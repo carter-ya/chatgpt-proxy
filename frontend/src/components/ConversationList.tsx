@@ -1,5 +1,5 @@
 import type { Conversation } from '../api/client';
-import { formatTime } from '../utils/format';
+import { formatTime, getAvatarLetter } from '../utils/format';
 import { useAuth } from '../contexts/AuthContext';
 
 interface ConversationListProps {
@@ -55,7 +55,7 @@ export default function ConversationList({
       <div className="sidebar-footer">
         <div className="user-info">
           <div className="user-avatar">
-            {user?.email?.charAt(0).toUpperCase() || '?'}
+            {getAvatarLetter(user?.email)}
           </div>
           <span className="user-email">{user?.email || ''}</span>
           <button

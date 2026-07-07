@@ -1,0 +1,14 @@
+{
+  "namespace": "frontend",
+  "targets": {
+    "app": {
+      "workdir": ".",
+      "build": "npm run build",
+      "start": "npm run dev",
+      "health": "http://localhost:{port:dev}",
+      "ports": {
+        "dev": { "port": 5173, "host": "127.0.0.1" }
+      }
+    }
+  }
+}

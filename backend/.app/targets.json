@@ -1,0 +1,15 @@
+{
+  "namespace": "backend",
+  "targets": {
+    "server": {
+      "workdir": ".",
+      "build": "go build ./...",
+      "start": "go run ./cmd/server/main.go",
+      "test": "go test ./...",
+      "health": "http://localhost:{port:server}",
+      "ports": {
+        "server": { "port": 8080, "host": "127.0.0.1" }
+      }
+    }
+  }
+}

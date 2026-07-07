@@ -97,7 +97,13 @@ func (h *ProxyHandler) Conversation(c *gin.Context) {
 	// Handle SSE streaming.
 	if err := proxy.StreamSSE(c, resp); err != nil {
 		// SSE streaming errors are logged but the response may already be partially sent.
-		_ = tokenValue // tokenValue captured for logging
+		log.Printf("[Proxy] SSE 流异常: %v", err)
+		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
+		if findErr == nil && token != nil {
+			if markErr := h.sessionManager.MarkTokenExpired(ctx, token.ID); markErr != nil {
+				log.Printf("[Proxy] 标记 token 失效失败: %v", markErr)
+			}
+		}
 		return
 	}
 }

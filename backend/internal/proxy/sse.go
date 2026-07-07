@@ -12,6 +12,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// ErrSSEAbnormalTermination is returned when the SSE stream terminates
+// abnormally (EOF without receiving the data: [DONE] marker).
+var ErrSSEAbnormalTermination = errors.New("SSE 流非正常终止：未收到 data: [DONE] 即到达 EOF")
+
 // StreamSSE transparently streams SSE (Server-Sent Events) from an upstream HTTP response
 // to the gin client. It flushes each chunk immediately for real-time delivery.
 func StreamSSE(c *gin.Context, resp *http.Response) error {
@@ -54,7 +58,7 @@ func StreamSSE(c *gin.Context, resp *http.Response) error {
 		case <-done:
 			if scanErr != nil {
 				if errors.Is(scanErr, io.EOF) {
-					return nil
+					return ErrSSEAbnormalTermination
 				}
 				// Send SSE error event to client before closing.
 				fmt.Fprintf(c.Writer, "event: error\ndata: SSE 流读取中断\n\n")

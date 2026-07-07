@@ -104,12 +104,19 @@ func TestRegister_ValidationErrors(t *testing.T) {
 	r, _ := setupAuthHandler(t)
 
 	tests := []struct {
-		name string
-		body interface{}
+		name           string
+		body           interface{}
+		wantCode       int
+		wantErrMessage string
 	}{
-		{"invalid email", auth.RegisterRequest{Email: "notanemail", Password: "password123"}},
-		{"short password", auth.RegisterRequest{Email: "test@example.com", Password: "12345"}},
-		{"missing fields", map[string]string{}},
+		// R-7.4: empty email → 400 + "邮箱不能为空"
+		{"empty email", auth.RegisterRequest{Email: "", Password: "password123"}, http.StatusBadRequest, "邮箱不能为空"},
+		// R-7.5: invalid email format → 400 + "邮箱格式无效"
+		{"invalid email", auth.RegisterRequest{Email: "notanemail", Password: "password123"}, http.StatusBadRequest, "邮箱格式无效"},
+		// R-7.6: short password (<6) → 400 + "密码长度不足，至少需要6个字符"
+		{"short password", auth.RegisterRequest{Email: "test@example.com", Password: "12345"}, http.StatusBadRequest, "密码长度不足，至少需要6个字符"},
+		// R-7.7: missing required fields → 400 + field-specific error (first: 邮箱不能为空)
+		{"missing fields", map[string]string{}, http.StatusBadRequest, "邮箱不能为空"},
 	}
 
 	for _, tt := range tests {
@@ -119,8 +126,16 @@ func TestRegister_ValidationErrors(t *testing.T) {
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, req)
 
-			if w.Code == http.StatusCreated {
-				t.Fatal("expected validation error, got 201")
+			if w.Code != tt.wantCode {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantCode, w.Code, w.Body.String())
+			}
+
+			var resp map[string]string
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to parse error response: %v", err)
+			}
+			if resp["error"] != tt.wantErrMessage {
+				t.Fatalf("expected error message %q, got %q", tt.wantErrMessage, resp["error"])
 			}
 		})
 	}

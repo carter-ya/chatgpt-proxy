@@ -10,7 +10,7 @@ export default defineConfig({
           proxy: {
             '/api': {
               target: /\{port:.*\}/.test(process.env.VITE_API_TARGET)
-                ? `http://localhost:${process.env.BACKEND_PORT}`
+                ? `http://localhost:${process.env.BACKEND_PORT || process.env.XIAOMING_SERVER_PORT || 8080}`
                 : process.env.VITE_API_TARGET,
               changeOrigin: true,
             },

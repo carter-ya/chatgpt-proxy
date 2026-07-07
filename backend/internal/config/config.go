@@ -32,6 +32,8 @@ type Config struct {
 	EncryptionKey string `mapstructure:"encryption_key" default:"" validate:"required,base64"`
 	// ChatGPTBaseURL chatgpt.com 的基础 URL
 	ChatGPTBaseURL string `mapstructure:"chatgpt_base_url" default:"https://chatgpt.com" validate:"required,url"`
+	// TokenCheckInterval session token 健康检查间隔
+	TokenCheckInterval time.Duration `mapstructure:"token_check_interval" default:"5m" validate:"min=30s"`
 }
 
 // Load 从环境变量加载配置，注入默认值并校验。
@@ -51,6 +53,7 @@ func Load() (*Config, error) {
 	v.BindEnv("jwt_expiration")
 	v.BindEnv("encryption_key")
 	v.BindEnv("chatgpt_base_url")
+	v.BindEnv("token_check_interval")
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {

@@ -11,6 +11,7 @@ import (
 
 	"chatgpt-proxy/backend/internal/auth"
 	"chatgpt-proxy/backend/internal/config"
+	"chatgpt-proxy/backend/internal/cron"
 	"chatgpt-proxy/backend/internal/db"
 	"chatgpt-proxy/backend/internal/handler"
 	"chatgpt-proxy/backend/internal/httpresp"
@@ -20,13 +21,15 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/go-co-op/gocron/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type App struct {
-	cfg    *config.Config
-	engine *gin.Engine
-	pool   *pgxpool.Pool
+	cfg       *config.Config
+	engine    *gin.Engine
+	pool      *pgxpool.Pool
+	scheduler gocron.Scheduler
 }
 
 func New(cfg *config.Config) (*App, error) {
@@ -70,10 +73,16 @@ func New(cfg *config.Config) (*App, error) {
 	protected.GET("/conversations/:id", proxyHandler.GetConversation)
 	protected.PATCH("/conversations/:id", proxyHandler.UpdateConversation)
 
+	scheduler, err := cron.StartTokenHealthCheck(sessionManager, cfg.TokenCheckInterval)
+	if err != nil {
+		return nil, fmt.Errorf("启动 token 健康检查失败: %w", err)
+	}
+
 	return &App{
-		cfg:    cfg,
-		engine: engine,
-		pool:   pool,
+		cfg:       cfg,
+		engine:    engine,
+		pool:      pool,
+		scheduler: scheduler,
 	}, nil
 }
 
@@ -105,6 +114,11 @@ func (a *App) Run() error {
 }
 
 func (a *App) Close() {
+	if a.scheduler != nil {
+		if err := a.scheduler.Shutdown(); err != nil {
+			log.Printf("app: 关闭 cron 调度器失败: %v", err)
+		}
+	}
 	if a.pool != nil {
 		a.pool.Close()
 	}

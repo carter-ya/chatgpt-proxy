@@ -139,6 +139,7 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 		resp.Body.Close()
 
 		// Mark token as expired.
+		log.Printf("[Proxy] token 已失效 token_prefix=%.8s...", tokenValue[:min(8, len(tokenValue))])
 		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
 		if findErr == nil && token != nil {
 			_ = h.sessionManager.MarkTokenExpired(ctx, token.ID)
@@ -233,6 +234,7 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 
 	// Handle 401/403 for file upload as well.
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		log.Printf("[Proxy] token 已失效 token_prefix=%.8s...", tokenValue[:min(8, len(tokenValue))])
 		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
 		if findErr == nil && token != nil {
 			_ = h.sessionManager.MarkTokenExpired(ctx, token.ID)
@@ -303,6 +305,7 @@ func (h *ProxyHandler) proxyGet(c *gin.Context, upstreamPath string) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		log.Printf("[Proxy] token 已失效 token_prefix=%.8s...", tokenValue[:min(8, len(tokenValue))])
 		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
 		if findErr == nil && token != nil {
 			_ = h.sessionManager.MarkTokenExpired(ctx, token.ID)
@@ -360,6 +363,7 @@ func (h *ProxyHandler) proxyWithBody(c *gin.Context, method, upstreamPath string
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		log.Printf("[Proxy] token 已失效 token_prefix=%.8s...", tokenValue[:min(8, len(tokenValue))])
 		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
 		if findErr == nil && token != nil {
 			_ = h.sessionManager.MarkTokenExpired(ctx, token.ID)

@@ -9,7 +9,7 @@ import (
 )
 
 type User struct {
-	ID             int32
+	ID             string
 	Email          string
 	HashedPassword string
 }
@@ -43,7 +43,7 @@ type CreateUserParams struct {
 }
 
 func (q *Queries) CreateUser(ctx context.Context, params CreateUserParams) (User, error) {
-	const sql = `INSERT INTO users (email, hashed_password) VALUES ($1, $2) RETURNING id, email, hashed_password`
+	const sql = `INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email, password_hash`
 	var u User
 	err := q.db.QueryRow(ctx, sql, params.Email, params.HashedPassword).Scan(&u.ID, &u.Email, &u.HashedPassword)
 	return u, err
@@ -54,7 +54,7 @@ type GetUserByEmailParams struct {
 }
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
-	const sql = `SELECT id, email, hashed_password FROM users WHERE email = $1`
+	const sql = `SELECT id, email, password_hash FROM users WHERE email = $1`
 	var u User
 	err := q.db.QueryRow(ctx, sql, email).Scan(&u.ID, &u.Email, &u.HashedPassword)
 	return u, err

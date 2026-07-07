@@ -4,15 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"path/filepath"
+
+	"chatgpt-proxy/backend/migrations"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/exc-works/migrate"
 )
 
-// RunMigrations reads SQL migration files from the migrations directory and
-// executes them against the given PostgreSQL database.
+// RunMigrations reads SQL migration files from the embedded migrations
+// filesystem and executes them against the given PostgreSQL database.
 func RunMigrations(dbURL string) error {
 	ctx := context.Background()
 
@@ -22,15 +23,10 @@ func RunMigrations(dbURL string) error {
 	}
 	defer db.Close()
 
-	absDir, err := filepath.Abs("migrations")
-	if err != nil {
-		return fmt.Errorf("resolve migrations dir: %w", err)
-	}
-
 	svc, err := migrate.NewService(ctx, migrate.Config{
 		Dialect:         migrate.NewPostgresDialect(),
 		DB:              db,
-		MigrationSource: migrate.DirectorySource{Directory: absDir},
+		MigrationSource: migrate.FSSource{FS: migrations.FS},
 		SchemaName:      "migration_schema",
 		Logger:          migrate.NoopLogger{},
 	})

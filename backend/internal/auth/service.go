@@ -76,7 +76,7 @@ func (s *Service) Login(ctx context.Context, email, password string) (*LoginResp
 	}, nil
 }
 
-func (s *Service) generateJWT(userID int32, email string) (string, error) {
+func (s *Service) generateJWT(userID string, email string) (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
 		"user_id": userID,

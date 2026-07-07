@@ -133,8 +133,8 @@ func TestRegister_Success(t *testing.T) {
 	mockDB.queryRowFn = func(ctx context.Context, sql string, args ...interface{}) pgx.Row {
 		return &mockRow{
 			scanFn: func(dest ...interface{}) error {
-				// dest: &id, &email, &hashedPassword
-				*(dest[0].(*int32)) = 1
+				// dest: &id, &email, &password_hash
+				*(dest[0].(*string)) = "00000000-0000-0000-0000-000000000001"
 				*(dest[1].(*string)) = "test@example.com"
 				// dest[2] is the hashed password — we don't care about its value
 				return nil
@@ -159,8 +159,8 @@ func TestRegister_Success(t *testing.T) {
 	if resp.Email != "test@example.com" {
 		t.Errorf("expected email 'test@example.com', got '%s'", resp.Email)
 	}
-	if resp.ID != 1 {
-		t.Errorf("expected ID 1, got %d", resp.ID)
+	if resp.ID != "00000000-0000-0000-0000-000000000001" {
+		t.Errorf("expected ID '00000000-0000-0000-0000-000000000001', got '%s'", resp.ID)
 	}
 }
 
@@ -190,8 +190,8 @@ func TestLogin_Success(t *testing.T) {
 	mockDB.queryRowFn = func(ctx context.Context, sql string, args ...interface{}) pgx.Row {
 		return &mockRow{
 			scanFn: func(dest ...interface{}) error {
-				// dest: &id, &email, &hashedPassword
-				*(dest[0].(*int32)) = 1
+				// dest: &id, &email, &password_hash
+				*(dest[0].(*string)) = "00000000-0000-0000-0000-000000000001"
 				*(dest[1].(*string)) = "test@example.com"
 				*(dest[2].(*string)) = string(hashed)
 				return nil
@@ -233,7 +233,7 @@ func TestLogin_InvalidCredentials(t *testing.T) {
 	mockDB.queryRowFn = func(ctx context.Context, sql string, args ...interface{}) pgx.Row {
 		return &mockRow{
 			scanFn: func(dest ...interface{}) error {
-				*(dest[0].(*int32)) = 1
+				*(dest[0].(*string)) = "00000000-0000-0000-0000-000000000001"
 				*(dest[1].(*string)) = "test@example.com"
 				*(dest[2].(*string)) = string(hashed)
 				return nil

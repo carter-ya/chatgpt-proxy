@@ -30,6 +30,10 @@ type App struct {
 }
 
 func New(cfg *config.Config) (*App, error) {
+	if err := db.RunMigrations(cfg.DatabaseURL); err != nil {
+		return nil, fmt.Errorf("run migrations: %w", err)
+	}
+
 	pool, err := db.NewPool(context.Background(), cfg.DatabaseURL)
 	if err != nil {
 		return nil, err

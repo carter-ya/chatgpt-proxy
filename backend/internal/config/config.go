@@ -63,5 +63,16 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: 校验失败: %w", err)
 	}
 
+	// 显式检查必需配置项的空值。
+	// validator 的 required tag 对 string 类型的零值（空字符串）有效，
+	// 但 DatabaseURL 没有 required tag，且使用 default:"" 仅为语义占位。
+	// 显式检查确保缺失关键配置时输出清晰的错误信息。
+	if cfg.DatabaseURL == "" {
+		return nil, fmt.Errorf("config: 配置项 XIAOMING_DATABASE_URL 不能为空")
+	}
+	if cfg.JWTSecret == "" {
+		return nil, fmt.Errorf("config: 配置项 XIAOMING_JWT_SECRET 不能为空")
+	}
+
 	return &cfg, nil
 }

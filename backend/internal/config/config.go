@@ -37,6 +37,17 @@ func Load() (*Config, error) {
 	v.SetEnvPrefix("XIAOMING")
 	v.AutomaticEnv()
 
+	// 显式绑定每个 Config 字段的环境变量，确保 AutomaticEnv + SetEnvPrefix
+	// 在 Unmarshal 时能正确将 XIAOMING_* 环境变量映射到 mapstructure 字段。
+	// 仅靠 AutomaticEnv 在某些 viper 版本中不会自动绑定带前缀的 key。
+	v.BindEnv("server_port")
+	v.BindEnv("database_url")
+	v.BindEnv("session_tokens")
+	v.BindEnv("sentinel_cache_ttl")
+	v.BindEnv("jwt_secret")
+	v.BindEnv("jwt_expiration")
+	v.BindEnv("chatgpt_base_url")
+
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("config: unmarshal 失败: %w", err)

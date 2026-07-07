@@ -5,8 +5,8 @@ package main
 import (
 	"log"
 
-	"chatgpt-proxy/backend/internal/app"
-	"chatgpt-proxy/backend/internal/config"
+	"chatgpt-proxy/internal/app"
+	"chatgpt-proxy/internal/config"
 )
 
 func main() {
@@ -15,7 +15,12 @@ func main() {
 		log.Fatalf("配置加载失败: %v", err)
 	}
 
-	a := app.New(cfg)
+	a, err := app.New(cfg)
+	if err != nil {
+		log.Fatalf("应用初始化失败: %v", err)
+	}
+	defer a.Close()
+
 	if err := a.Run(); err != nil {
 		log.Fatalf("服务运行失败: %v", err)
 	}

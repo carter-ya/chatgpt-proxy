@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"time"
 
 	go_default "github.com/exc-works/go-default"
 	"github.com/go-playground/validator/v10"
@@ -26,7 +27,7 @@ type Config struct {
 	// JWTSecret JWT 签名密钥
 	JWTSecret string `mapstructure:"jwt_secret" default:"" validate:"required"`
 	// JWTExpiration JWT 过期时间（小时）
-	JWTExpiration int `mapstructure:"jwt_expiration" default:"24" validate:"min=1"`
+	JWTExpiration time.Duration `mapstructure:"jwt_expiration" default:"24h" validate:"min=1h"`
 	// ChatGPTBaseURL chatgpt.com 的基础 URL
 	ChatGPTBaseURL string `mapstructure:"chatgpt_base_url" default:"https://chatgpt.com" validate:"required,url"`
 }

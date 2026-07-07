@@ -179,6 +179,13 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 		return
 	}
 
+	// Validate file size does not exceed 50MB.
+	const maxUploadSize = 50 * 1024 * 1024 // 50MB
+	if header.Size > maxUploadSize {
+		httpresp.Error(c, http.StatusRequestEntityTooLarge, "上传文件大小不能超过 50MB")
+		return
+	}
+
 	// Validate MIME type is image/*.
 	if !strings.HasPrefix(header.Header.Get("Content-Type"), "image/") {
 		httpresp.Error(c, http.StatusBadRequest, "仅支持上传图片文件（image/*）")

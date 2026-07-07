@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -11,6 +12,15 @@ type User struct {
 	ID             int32
 	Email          string
 	HashedPassword string
+}
+
+// SessionToken represents a row in the session_tokens table.
+type SessionToken struct {
+	ID         string    `json:"id"`
+	TokenValue string    `json:"token_value"`
+	Status     string    `json:"status"` // "active" or "expired"
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type DBTX interface {
@@ -48,4 +58,34 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 	var u User
 	err := q.db.QueryRow(ctx, sql, email).Scan(&u.ID, &u.Email, &u.HashedPassword)
 	return u, err
+}
+
+// GetActiveSessionTokens returns all session tokens with status "active".
+func (q *Queries) GetActiveSessionTokens(ctx context.Context) ([]SessionToken, error) {
+	const sql = `SELECT id, token_value, status, created_at, updated_at FROM session_tokens WHERE status = 'active' ORDER BY created_at ASC`
+	rows, err := q.db.Query(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []SessionToken
+	for rows.Next() {
+		var t SessionToken
+		if err := rows.Scan(&t.ID, &t.TokenValue, &t.Status, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tokens, nil
+}
+
+// UpdateSessionTokenStatus updates the status of a session token.
+func (q *Queries) UpdateSessionTokenStatus(ctx context.Context, id string, status string) error {
+	const sql = `UPDATE session_tokens SET status = $1, updated_at = NOW() WHERE id = $2`
+	_, err := q.db.Exec(ctx, sql, status, id)
+	return err
 }

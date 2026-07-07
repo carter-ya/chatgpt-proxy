@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"chatgpt-proxy/internal/sentinel"
+	"chatgpt-proxy/backend/internal/sentinel"
 
 	"github.com/google/uuid"
 )

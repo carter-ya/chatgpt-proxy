@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync"
 
-	"chatgpt-proxy/internal/db"
+	"chatgpt-proxy/backend/internal/db"
 )
 
 // SessionToken wraps a db.SessionToken for manager usage.

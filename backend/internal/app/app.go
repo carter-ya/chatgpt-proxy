@@ -14,6 +14,9 @@ import (
 	"chatgpt-proxy/backend/internal/db"
 	"chatgpt-proxy/backend/internal/handler"
 	"chatgpt-proxy/backend/internal/httpresp"
+	"chatgpt-proxy/backend/internal/proxy"
+	"chatgpt-proxy/backend/internal/sentinel"
+	"chatgpt-proxy/backend/internal/session"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -27,7 +30,7 @@ type App struct {
 }
 
 func New(cfg *config.Config) (*App, error) {
-	pool, err := pgxpool.New(context.Background(), "")
+	pool, err := db.NewPool(context.Background(), cfg.DatabaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -41,6 +44,11 @@ func New(cfg *config.Config) (*App, error) {
 
 	authHandler := handler.NewAuthHandler(authSvc)
 
+	sentinelCache := sentinel.NewTokenCache(cfg.SentinelCacheTTL)
+	sessionManager := session.NewManager(queries)
+	proxyClient := proxy.NewProxyClient(cfg.ChatGPTBaseURL, sentinelCache)
+	proxyHandler := handler.NewProxyHandler(proxyClient, sessionManager)
+
 	engine := gin.New()
 	engine.Use(gin.Recovery(), gin.Logger())
 	engine.Use(cors.Default())
@@ -48,7 +56,12 @@ func New(cfg *config.Config) (*App, error) {
 	api := engine.Group("/api")
 	api.GET("/health", health)
 	RegisterAuthRoutes(api, authHandler)
-	RegisterProtectedRoutes(api, cfg.JWTSecret)
+	protected := RegisterProtectedRoutes(api, cfg.JWTSecret)
+	protected.POST("/conversation", proxyHandler.Conversation)
+	protected.POST("/files", proxyHandler.UploadFile)
+	protected.GET("/conversations", proxyHandler.ListConversations)
+	protected.GET("/conversations/:id", proxyHandler.GetConversation)
+	protected.PATCH("/conversations/:id", proxyHandler.UpdateConversation)
 
 	return &App{
 		cfg:    cfg,

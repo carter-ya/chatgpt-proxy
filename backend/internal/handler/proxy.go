@@ -11,9 +11,9 @@ import (
 	"net/http"
 	"strings"
 
-	"chatgpt-proxy/internal/httpresp"
-	"chatgpt-proxy/internal/proxy"
-	"chatgpt-proxy/internal/session"
+	"chatgpt-proxy/backend/internal/httpresp"
+	"chatgpt-proxy/backend/internal/proxy"
+	"chatgpt-proxy/backend/internal/session"
 
 	"github.com/gin-gonic/gin"
 )

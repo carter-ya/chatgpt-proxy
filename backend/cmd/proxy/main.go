@@ -3,15 +3,24 @@ package main
 import (
 	"log"
 
-	"chatgpt-proxy/internal"
+	"chatgpt-proxy/backend/internal/app"
+	"chatgpt-proxy/backend/internal/config"
 )
 
 func main() {
-	cfg := internal.DefaultConfig()
-	r := internal.SetupRouter(cfg)
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("配置加载失败: %v", err)
+	}
 
-	log.Println("ChatGPT Proxy 服务启动在 :8080")
-	if err := r.Run(":8080"); err != nil {
-		log.Fatalf("服务启动失败: %v", err)
+	a, err := app.New(cfg)
+	if err != nil {
+		log.Fatalf("应用初始化失败: %v", err)
+	}
+	defer a.Close()
+
+	log.Println("ChatGPT Proxy 服务启动")
+	if err := a.Run(); err != nil {
+		log.Fatalf("服务运行失败: %v", err)
 	}
 }

@@ -9,7 +9,9 @@ export default defineConfig({
       ? {
           proxy: {
             '/api': {
-              target: process.env.VITE_API_TARGET,
+              target: /\{port:.*\}/.test(process.env.VITE_API_TARGET)
+                ? `http://localhost:${process.env.BACKEND_PORT}`
+                : process.env.VITE_API_TARGET,
               changeOrigin: true,
             },
           },

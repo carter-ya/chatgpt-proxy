@@ -22,8 +22,8 @@ type Config struct {
 	DatabaseURL string `mapstructure:"database_url" default:""`
 	// SessionTokens ChatGPT session token 列表
 	SessionTokens []string `mapstructure:"session_tokens" default:""`
-	// SentinelCacheTTL sentinel token 缓存 TTL（秒）
-	SentinelCacheTTL int `mapstructure:"sentinel_cache_ttl" default:"300" validate:"min=1"`
+	// SentinelCacheTTL sentinel token 缓存 TTL
+	SentinelCacheTTL time.Duration `mapstructure:"sentinel_cache_ttl" default:"5m"`
 	// JWTSecret JWT 签名密钥
 	JWTSecret string `mapstructure:"jwt_secret" default:"" validate:"required"`
 	// JWTExpiration JWT 过期时间（小时）

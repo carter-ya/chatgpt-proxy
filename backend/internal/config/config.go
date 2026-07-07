@@ -28,6 +28,8 @@ type Config struct {
 	JWTSecret string `mapstructure:"jwt_secret" default:"" validate:"required"`
 	// JWTExpiration JWT 过期时间（小时）
 	JWTExpiration time.Duration `mapstructure:"jwt_expiration" default:"24h" validate:"min=1h"`
+	// EncryptionKey AES-256 加密密钥（32字节 base64 编码）
+	EncryptionKey string `mapstructure:"encryption_key" default:"" validate:"required,base64"`
 	// ChatGPTBaseURL chatgpt.com 的基础 URL
 	ChatGPTBaseURL string `mapstructure:"chatgpt_base_url" default:"https://chatgpt.com" validate:"required,url"`
 }
@@ -47,6 +49,7 @@ func Load() (*Config, error) {
 	v.BindEnv("sentinel_cache_ttl")
 	v.BindEnv("jwt_secret")
 	v.BindEnv("jwt_expiration")
+	v.BindEnv("encryption_key")
 	v.BindEnv("chatgpt_base_url")
 
 	var cfg Config

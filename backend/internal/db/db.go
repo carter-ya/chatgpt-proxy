@@ -16,11 +16,11 @@ type User struct {
 
 // SessionToken represents a row in the session_tokens table.
 type SessionToken struct {
-	ID         string    `json:"id"`
-	TokenValue string    `json:"token_value"`
-	Status     string    `json:"status"` // "active" or "expired"
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID        string    `json:"id"`
+	Token     string    `json:"token"` // AES-256-GCM 加密存储，base64 编码
+	Status    string    `json:"status"` // "active" or "expired"
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type DBTX interface {
@@ -62,7 +62,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 
 // GetActiveSessionTokens returns all session tokens with status "active".
 func (q *Queries) GetActiveSessionTokens(ctx context.Context) ([]SessionToken, error) {
-	const sql = `SELECT id, token_value, status, created_at, updated_at FROM session_tokens WHERE status = 'active' ORDER BY created_at ASC`
+	const sql = `SELECT id, token, status, created_at, updated_at FROM session_tokens WHERE status = 'active' ORDER BY created_at ASC`
 	rows, err := q.db.Query(ctx, sql)
 	if err != nil {
 		return nil, err
@@ -72,7 +72,7 @@ func (q *Queries) GetActiveSessionTokens(ctx context.Context) ([]SessionToken, e
 	var tokens []SessionToken
 	for rows.Next() {
 		var t SessionToken
-		if err := rows.Scan(&t.ID, &t.TokenValue, &t.Status, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Token, &t.Status, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		tokens = append(tokens, t)

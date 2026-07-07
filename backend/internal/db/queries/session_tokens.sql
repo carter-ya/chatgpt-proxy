@@ -1,10 +1,10 @@
 -- name: CreateSessionToken :one
-INSERT INTO session_tokens (token_value, status)
+INSERT INTO session_tokens (token, status)
 VALUES ($1, 'active')
-RETURNING id, token_value, status, last_used_at, expired_at, version, created_at, updated_at;
+RETURNING id, token, status, last_used_at, expired_at, version, created_at, updated_at;
 
 -- name: GetActiveTokens :many
-SELECT id, token_value, status, last_used_at, expired_at, version, created_at, updated_at
+SELECT id, token, status, last_used_at, expired_at, version, created_at, updated_at
 FROM session_tokens
 WHERE status = 'active'
 ORDER BY created_at ASC;
@@ -20,6 +20,6 @@ SET last_used_at = now(), updated_at = now()
 WHERE id = $1;
 
 -- name: GetTokenByID :one
-SELECT id, token_value, status, last_used_at, expired_at, version, created_at, updated_at
+SELECT id, token, status, last_used_at, expired_at, version, created_at, updated_at
 FROM session_tokens
 WHERE id = $1;

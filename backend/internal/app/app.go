@@ -49,7 +49,10 @@ func New(cfg *config.Config) (*App, error) {
 	authHandler := handler.NewAuthHandler(authSvc)
 
 	sentinelCache := sentinel.NewTokenCache(cfg.SentinelCacheTTL)
-	sessionManager := session.NewManager(queries)
+	sessionManager, err := session.NewManager(queries, cfg.EncryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("初始化 session manager 失败: %w", err)
+	}
 	proxyClient := proxy.NewProxyClient(cfg.ChatGPTBaseURL, sentinelCache)
 	proxyHandler := handler.NewProxyHandler(proxyClient, sessionManager)
 

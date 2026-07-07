@@ -21,12 +21,12 @@ import (
 
 // ProxyHandler holds dependencies for proxy HTTP handlers.
 type ProxyHandler struct {
-	client         *proxy.ProxyClient
+	client         proxy.ProxyClient
 	sessionManager *session.Manager
 }
 
 // NewProxyHandler creates a new ProxyHandler.
-func NewProxyHandler(client *proxy.ProxyClient, sessionManager *session.Manager) *ProxyHandler {
+func NewProxyHandler(client proxy.ProxyClient, sessionManager *session.Manager) *ProxyHandler {
 	return &ProxyHandler{
 		client:         client,
 		sessionManager: sessionManager,

@@ -37,20 +37,20 @@ type mockRows struct {
 	idx  int
 }
 
-func (m *mockRows) Close()                                         {}
-func (m *mockRows) Err() error                                     { return nil }
-func (m *mockRows) Next() bool                                     { m.idx++; return m.idx <= len(m.rows) }
-func (m *mockRows) Scan(dest ...interface{}) error                 { return nil }
-func (m *mockRows) CommandTag() pgconn.CommandTag                  { return pgconn.CommandTag{} }
-func (m *mockRows) FieldDescriptions() []pgconn.FieldDescription   { return nil }
-func (m *mockRows) Values() ([]interface{}, error)                 { return nil, nil }
-func (m *mockRows) RawValues() [][]byte                            { return nil }
-func (m *mockRows) Conn() *pgx.Conn                                { return nil }
+func (m *mockRows) Close()                                       {}
+func (m *mockRows) Err() error                                   { return nil }
+func (m *mockRows) Next() bool                                   { m.idx++; return m.idx <= len(m.rows) }
+func (m *mockRows) Scan(dest ...interface{}) error               { return nil }
+func (m *mockRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (m *mockRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (m *mockRows) Values() ([]interface{}, error)               { return nil, nil }
+func (m *mockRows) RawValues() [][]byte                          { return nil }
+func (m *mockRows) Conn() *pgx.Conn                              { return nil }
 
 // mockDBTX implements db.DBTX and delegates to user-supplied functions.
 type mockDBTX struct {
-	execFn  func(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error)
-	queryFn func(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
+	execFn     func(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error)
+	queryFn    func(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
 	queryRowFn func(ctx context.Context, sql string, args ...interface{}) pgx.Row
 }
 

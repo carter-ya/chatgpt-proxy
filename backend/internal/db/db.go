@@ -17,7 +17,7 @@ type User struct {
 // SessionToken represents a row in the session_tokens table.
 type SessionToken struct {
 	ID        string    `json:"id"`
-	Token     string    `json:"token"` // AES-256-GCM 加密存储，base64 编码
+	Token     string    `json:"token"`  // AES-256-GCM 加密存储，base64 编码
 	Status    string    `json:"status"` // "active" or "expired"
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

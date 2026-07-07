@@ -12,16 +12,22 @@ import (
 	"github.com/google/uuid"
 )
 
-// ProxyClient builds and executes HTTP requests to chatgpt.com.
-type ProxyClient struct {
+// ProxyClient defines the interface for building and executing proxy HTTP requests.
+type ProxyClient interface {
+	BuildRequest(ctx context.Context, method, path, tokenValue string, body io.Reader, contentType string) (*http.Request, error)
+	Do(req *http.Request) (*http.Response, error)
+}
+
+// client is the concrete implementation of ProxyClient.
+type client struct {
 	baseURL       string
 	httpClient    *http.Client
 	sentinelCache *sentinel.TokenCache
 }
 
 // NewProxyClient creates a new ProxyClient.
-func NewProxyClient(baseURL string, sentinelCache *sentinel.TokenCache) *ProxyClient {
-	return &ProxyClient{
+func NewProxyClient(baseURL string, sentinelCache *sentinel.TokenCache) ProxyClient {
+	return &client{
 		baseURL:       baseURL,
 		sentinelCache: sentinelCache,
 		httpClient: &http.Client{
@@ -31,7 +37,7 @@ func NewProxyClient(baseURL string, sentinelCache *sentinel.TokenCache) *ProxyCl
 }
 
 // BuildRequest builds an HTTP request to chatgpt.com with all required headers and sentinel tokens.
-func (c *ProxyClient) BuildRequest(ctx context.Context, method, path, tokenValue string, body io.Reader, contentType string) (*http.Request, error) {
+func (c *client) BuildRequest(ctx context.Context, method, path, tokenValue string, body io.Reader, contentType string) (*http.Request, error) {
 	url := c.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
@@ -79,7 +85,7 @@ func WithCFClearance(ctx context.Context, cfClearance string) context.Context {
 }
 
 // Do executes the given HTTP request and returns the response.
-func (c *ProxyClient) Do(req *http.Request) (*http.Response, error) {
+func (c *client) Do(req *http.Request) (*http.Response, error) {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("代理请求执行失败: %w", err)

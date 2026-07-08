@@ -85,22 +85,21 @@ func Load() (*Config, error) {
 	}
 
 	// viper 的 Unmarshal（底层使用 mapstructure）无法将环境变量中的单个字符串值
-	// 自动转换为 []string。因此对于 []string 类型的字段，在 Unmarshal 之后
-	// 手动从 os.Getenv 读取并回填。
-	if len(cfg.SessionTokens) == 0 {
-		if tokenEnv := os.Getenv("XIAOMING_SESSION_TOKENS"); tokenEnv != "" {
-			// 按逗号分割以支持多个 token，同时过滤空字符串。
-			rawTokens := strings.Split(tokenEnv, ",")
-			var tokens []string
-			for _, t := range rawTokens {
-				t = strings.TrimSpace(t)
-				if t != "" {
-					tokens = append(tokens, t)
-				}
+	// 自动转换为 []string。go-default 的 default:"" 会将 []string 设为 []string{""}
+	// 而非 nil，因此不能再依赖 len(cfg.SessionTokens)==0 做守卫。
+	// 始终从 os.Getenv 读取并回填。
+	if tokenEnv := os.Getenv("XIAOMING_SESSION_TOKENS"); tokenEnv != "" {
+		// 按逗号分割以支持多个 token，同时过滤空字符串。
+		rawTokens := strings.Split(tokenEnv, ",")
+		var tokens []string
+		for _, t := range rawTokens {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tokens = append(tokens, t)
 			}
-			cfg.SessionTokens = tokens
-			log.Printf("[config] 手动回填 session_tokens: 共 %d 个 token", len(tokens))
 		}
+		cfg.SessionTokens = tokens
+		log.Printf("[config] 手动回填 session_tokens: 共 %d 个 token", len(tokens))
 	}
 
 	validate := validator.New()

@@ -121,7 +121,8 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
           <button
             className="send-btn"
             onClick={handleSend}
-            disabled={sending || !text.trim()}
+            aria-disabled={sending || !text.trim()}
+            tabIndex={0}
             aria-label="发送"
           >
             {sending ? <span className="spinner" /> : '➤'}

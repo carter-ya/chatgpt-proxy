@@ -96,7 +96,12 @@ export const chat = {
   },
 
   listConversations: () =>
-    apiClient.get<Conversation[]>('/conversations'),
+    apiClient.get<{
+      items: Conversation[];
+      total: number;
+      limit: number;
+      offset: number;
+    }>('/conversations'),
 
   getConversation: (id: string) =>
     apiClient.get<{ conversation: Conversation; messages: Message[] }>(

@@ -22,7 +22,13 @@ export default function Layout() {
   const loadConversations = useCallback(async () => {
     try {
       const res = await chat.listConversations();
-      setConversations(res.data);
+      const data = res.data;
+      const items = Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data)
+          ? data
+          : [];
+      setConversations(items);
     } catch {
       // ignore load errors
     }

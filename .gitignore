@@ -29,3 +29,5 @@ backend/internal/db/*.sql.go
 # go-enum generated files
 *_enum.go
 logs/
+.port-server
+backend/chatgpt-proxy

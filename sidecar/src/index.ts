@@ -25,6 +25,12 @@ const activeStreams = new Map<string, Response>();
 
 /** Check whether the current page shows a login button (not logged in). */
 async function checkLoginStatus(page: Page): Promise<boolean> {
+  // Guard: if we're stuck on a Cloudflare challenge page, we're definitely not logged in.
+  const pageTitle = await page.title();
+  if (pageTitle.includes('Just a moment') || pageTitle.includes('请稍候')) {
+    return false;
+  }
+
   // When not logged in, chatgpt.com shows a login button in the header/landing area.
   // This selector matches both <button> and <a> elements with "Log in" text.
   const loginButton = await page.$('button:has-text("Log in"), a:has-text("Log in")');
@@ -39,7 +45,7 @@ async function waitForManualLogin(userDataDir: string): Promise<void> {
   });
 
   const loginPage = await loginContext.newPage();
-  await loginPage.goto(CHATGPT_URL, { waitUntil: 'networkidle', timeout: 30000 });
+  await loginPage.goto(CHATGPT_URL, { waitUntil: 'load', timeout: 30000 });
 
   console.log('[sidecar] Waiting for manual login (timeout: 5 minutes)...');
   console.log('[sidecar] Please log in to chatgpt.com in the opened Chrome window.');
@@ -77,17 +83,27 @@ async function initializeBrowser(): Promise<void> {
   const userDataDir = path.resolve('./.browser-profile');
   console.log(`[sidecar] Browser profile directory: ${userDataDir}`);
 
-  // Step 1 — check existing session in headless mode
-  console.log('[sidecar] Launching headless Chrome to check login status...');
+  // Step 1 — check existing session (non-headless Chrome required for Cloudflare bypass)
+  console.log('[sidecar] Launching Chrome to check login status...');
   browserContext = await chromium.launchPersistentContext(userDataDir, {
-    headless: true,
+    // MUST be non-headless: headless Chrome cannot pass Cloudflare's JS challenge on chatgpt.com.
+    // The page would be stuck on "Just a moment..." indefinitely in headless mode.
+    headless: false,
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
 
   proxyPage = await browserContext.newPage();
 
   try {
-    await proxyPage.goto(CHATGPT_URL, { waitUntil: 'networkidle', timeout: 30000 });
+    await proxyPage.goto(CHATGPT_URL, { waitUntil: 'load', timeout: 30000 });
+
+    // Detect Cloudflare challenge page (headless: false usually avoids this, but guard anyway).
+    let title = await proxyPage.title();
+    if (title.includes('Just a moment') || title.includes('请稍候')) {
+      console.log('[sidecar] Cloudflare challenge detected, waiting up to 10s...');
+      await proxyPage.waitForTimeout(10_000);
+      title = await proxyPage.title();
+    }
   } catch (err) {
     console.warn('[sidecar] Initial navigation to chatgpt.com failed:', err);
   }
@@ -107,17 +123,26 @@ async function initializeBrowser(): Promise<void> {
     // Open visible browser, wait for user to log in
     await waitForManualLogin(userDataDir);
 
-    // Relaunch headless — the persistent profile now has valid cookies
-    console.log('[sidecar] Login successful. Switching back to headless mode...');
+    // Relaunch with persistent profile (now has valid cookies) — keep non-headless for Cloudflare
+    console.log('[sidecar] Login successful. Relaunching browser...');
     browserContext = await chromium.launchPersistentContext(userDataDir, {
-      headless: true,
+      // MUST remain non-headless: Cloudflare challenge would block headless mode.
+      headless: false,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
     proxyPage = await browserContext.newPage();
 
     // Verify the session is still good
     try {
-      await proxyPage.goto(CHATGPT_URL, { waitUntil: 'networkidle', timeout: 30000 });
+      await proxyPage.goto(CHATGPT_URL, { waitUntil: 'load', timeout: 30000 });
+
+      // Guard against Cloudflare challenge page after login.
+      let title = await proxyPage.title();
+      if (title.includes('Just a moment') || title.includes('请稍候')) {
+        console.log('[sidecar] Cloudflare challenge detected post-login, waiting up to 10s...');
+        await proxyPage.waitForTimeout(10_000);
+        title = await proxyPage.title();
+      }
     } catch (err) {
       console.warn('[sidecar] Post-login navigation to chatgpt.com failed:', err);
     }

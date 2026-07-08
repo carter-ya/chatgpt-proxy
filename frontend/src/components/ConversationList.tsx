@@ -6,6 +6,7 @@ interface ConversationListProps {
   conversations: Conversation[];
   activeId: string | null;
   sidebarOpen: boolean;
+  loadError?: boolean;
   onSelect: (conv: Conversation) => void;
   onNewChat: () => void;
 }
@@ -14,6 +15,7 @@ export default function ConversationList({
   conversations,
   activeId,
   sidebarOpen,
+  loadError,
   onSelect,
   onNewChat,
 }: ConversationListProps) {
@@ -38,7 +40,19 @@ export default function ConversationList({
             <span className="conv-time">{formatTime(conv.updated_at)}</span>
           </div>
         ))}
-        {conversations.length === 0 && (
+        {conversations.length === 0 && loadError && (
+          <div
+            style={{
+              padding: '24px 14px',
+              textAlign: 'center',
+              color: '#d32f2f',
+              fontSize: 14,
+            }}
+          >
+            加载失败
+          </div>
+        )}
+        {conversations.length === 0 && !loadError && (
           <div
             style={{
               padding: '24px 14px',

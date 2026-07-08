@@ -18,6 +18,7 @@ export default function Layout() {
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   const loadConversations = useCallback(async () => {
     try {
@@ -29,8 +30,9 @@ export default function Layout() {
           ? data
           : [];
       setConversations(items);
+      setLoadError(false);
     } catch {
-      // ignore load errors
+      setLoadError(true);
     }
   }, []);
 
@@ -70,6 +72,7 @@ export default function Layout() {
         conversations={conversations}
         activeId={conversationId || null}
         sidebarOpen={sidebarOpen}
+        loadError={loadError}
         onSelect={handleSelectConversation}
         onNewChat={handleNewChat}
       />

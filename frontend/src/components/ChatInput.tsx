@@ -88,18 +88,9 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
 
       <div className="chat-input-container">
         <div className="chat-input-wrapper">
-          {sending ? (
+          {sending && (
             <button className="send-btn" onClick={onCancel} aria-label="停止生成">
               ⏹
-            </button>
-          ) : (
-            <button
-              className="upload-btn"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-              aria-label="上传图片"
-            >
-              {uploading ? <span className="spinner" /> : '📎'}
             </button>
           )}
 
@@ -115,6 +106,17 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
             disabled={sending}
             rows={1}
           />
+
+          {!sending && (
+            <button
+              className="upload-btn"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              aria-label="上传图片"
+            >
+              {uploading ? <span className="spinner" /> : '📎'}
+            </button>
+          )}
 
           <button
             className="send-btn"

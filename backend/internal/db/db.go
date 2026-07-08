@@ -97,6 +97,14 @@ func (q *Queries) UpdateSessionTokenStatus(ctx context.Context, id string, statu
 	return err
 }
 
+// CreateSessionToken inserts a new session token with status "active".
+func (q *Queries) CreateSessionToken(ctx context.Context, encryptedToken string) (SessionToken, error) {
+	const sql = `INSERT INTO session_tokens (token, status) VALUES ($1, 'active') RETURNING id, token, status, created_at, updated_at`
+	var t SessionToken
+	err := q.db.QueryRow(ctx, sql, encryptedToken).Scan(&t.ID, &t.Token, &t.Status, &t.CreatedAt, &t.UpdatedAt)
+	return t, err
+}
+
 // CreateConversation inserts a new conversation row. Uses ON CONFLICT DO NOTHING
 // to safely handle cases where the conversation already exists.
 func (q *Queries) CreateConversation(ctx context.Context, id, userID, title string) error {

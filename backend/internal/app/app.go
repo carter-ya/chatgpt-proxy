@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"chatgpt-proxy/backend/internal/auth"
 	"chatgpt-proxy/backend/internal/config"
 	"chatgpt-proxy/backend/internal/cron"
+	"chatgpt-proxy/backend/internal/crypto"
 	"chatgpt-proxy/backend/internal/db"
 	"chatgpt-proxy/backend/internal/handler"
 	"chatgpt-proxy/backend/internal/httpresp"
@@ -56,6 +58,10 @@ func New(cfg *config.Config) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("初始化 session manager 失败: %w", err)
 	}
+
+	// 播种 session token：将配置文件中的 token 加密后写入数据库，重复启动不重复插入。
+	seedSessionTokens(context.Background(), cfg.SessionTokens, queries, sessionManager, cfg.EncryptionKey)
+
 	proxyClient := proxy.NewProxyClient(cfg.ChatGPTBaseURL, sentinelCache)
 	proxyHandler := handler.NewProxyHandler(proxyClient, sessionManager, queries)
 
@@ -84,6 +90,57 @@ func New(cfg *config.Config) (*App, error) {
 		pool:      pool,
 		scheduler: scheduler,
 	}, nil
+}
+
+// seedSessionTokens 将配置中的 session token 加密后写入数据库。
+// 通过解密现有 token 对比明文实现去重，重复启动不重复插入。
+// 播种失败仅打印警告日志，不会阻止应用启动。
+func seedSessionTokens(ctx context.Context, tokens []string, queries *db.Queries, mgr *session.Manager, encryptionKey string) {
+	keyBytes, err := base64.StdEncoding.DecodeString(encryptionKey)
+	if err != nil {
+		log.Printf("[app] 播种 session token 失败: 解码加密密钥错误: %v", err)
+		return
+	}
+
+	// 获取所有 active token，解密后构建明文集合用于去重。
+	existingTokens, err := mgr.GetAllActiveTokens(ctx)
+	if err != nil {
+		log.Printf("[app] 播种 session token 失败: 获取现有 token 出错: %v", err)
+		return
+	}
+
+	existing := make(map[string]bool)
+	for _, t := range existingTokens {
+		plaintext, decErr := crypto.Decrypt(t.Token, keyBytes)
+		if decErr != nil {
+			// 无法解密的 token 跳过，不影响播种流程。
+			log.Printf("[app] 播种: 解密现有 token 失败，跳过: %v", decErr)
+			continue
+		}
+		existing[plaintext] = true
+	}
+
+	for _, token := range tokens {
+		if token == "" {
+			continue
+		}
+		if existing[token] {
+			continue
+		}
+
+		encrypted, encErr := crypto.Encrypt(token, keyBytes)
+		if encErr != nil {
+			log.Printf("[app] 播种 session token 失败: 加密错误: %v", encErr)
+			continue
+		}
+
+		if _, insErr := queries.CreateSessionToken(ctx, encrypted); insErr != nil {
+			log.Printf("[app] 播种 session token 失败: 插入数据库出错: %v", insErr)
+			continue
+		}
+
+		log.Printf("[app] session token 已播种 prefix=%.8s...", token)
+	}
 }
 
 func (a *App) Engine() *gin.Engine {

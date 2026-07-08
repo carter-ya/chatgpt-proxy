@@ -31,3 +31,4 @@ backend/internal/db/*.sql.go
 logs/
 .port-server
 backend/chatgpt-proxy
+.browser-profile/

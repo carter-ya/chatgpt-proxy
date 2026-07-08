@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	go_default "github.com/exc-works/go-default"
@@ -70,6 +71,10 @@ func Load() (*Config, error) {
 	v.BindEnv("sidecar_port")
 	v.BindEnv("token_check_interval")
 
+	// 调试：在 Unmarshal 前确认关键环境变量已通过 godotenv 注入。
+	log.Printf("[config] Unmarshal 前 XIAOMING_SESSION_TOKENS len=%d (os.Getenv)", len(os.Getenv("XIAOMING_SESSION_TOKENS")))
+	log.Printf("[config] Unmarshal 前 XIAOMING_DATABASE_URL len=%d", len(os.Getenv("XIAOMING_DATABASE_URL")))
+
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("config: unmarshal 失败: %w", err)
@@ -77,6 +82,25 @@ func Load() (*Config, error) {
 
 	if err := go_default.Struct(&cfg); err != nil {
 		return nil, fmt.Errorf("config: 默认值注入失败: %w", err)
+	}
+
+	// viper 的 Unmarshal（底层使用 mapstructure）无法将环境变量中的单个字符串值
+	// 自动转换为 []string。因此对于 []string 类型的字段，在 Unmarshal 之后
+	// 手动从 os.Getenv 读取并回填。
+	if len(cfg.SessionTokens) == 0 {
+		if tokenEnv := os.Getenv("XIAOMING_SESSION_TOKENS"); tokenEnv != "" {
+			// 按逗号分割以支持多个 token，同时过滤空字符串。
+			rawTokens := strings.Split(tokenEnv, ",")
+			var tokens []string
+			for _, t := range rawTokens {
+				t = strings.TrimSpace(t)
+				if t != "" {
+					tokens = append(tokens, t)
+				}
+			}
+			cfg.SessionTokens = tokens
+			log.Printf("[config] 手动回填 session_tokens: 共 %d 个 token", len(tokens))
+		}
 	}
 
 	validate := validator.New()
@@ -107,7 +131,9 @@ func loadEnvFile() {
 	if _, err := os.Stat(envPath); err == nil {
 		if err := godotenv.Load(envPath); err != nil {
 			log.Printf("警告: 无法加载 .env 文件 (%s): %v", envPath, err)
+			return
 		}
+		log.Printf("[config] .env 文件加载成功 (%s)", envPath)
 	} else {
 		log.Printf("未找到 .env 文件 (%s)，跳过自动加载", envPath)
 	}

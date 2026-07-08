@@ -130,34 +130,86 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 		return nil, "", err
 	}
 
+	now := time.Now().Unix()
+
 	// Build the user message — multimodal when attachment_file_id is present.
 	var userMessage map[string]interface{}
 	if reqBody.AttachmentFileID != "" {
 		userMessage = map[string]interface{}{
-			"id":     uuid.New().String(),
-			"author": map[string]interface{}{"role": "user"},
-			"content": []map[string]interface{}{
-				{"type": "text", "text": reqBody.Message},
-				{"type": "image_upload", "file_id": reqBody.AttachmentFileID},
+			"id":          uuid.New().String(),
+			"author":      map[string]interface{}{"role": "user"},
+			"create_time": now,
+			"content": map[string]interface{}{
+				"content_type": "multimodal_text",
+				"parts": []interface{}{
+					map[string]interface{}{
+						"content_type":  "image_asset_pointer",
+						"asset_pointer": "file-service://" + reqBody.AttachmentFileID,
+						"size_bytes":    0,
+						"width":         0,
+						"height":        0,
+					},
+					reqBody.Message,
+				},
+			},
+			"metadata": map[string]interface{}{
+				"serialization_metadata": map[string]interface{}{
+					"custom_symbol_offsets": []interface{}{},
+				},
 			},
 		}
 	} else {
 		userMessage = map[string]interface{}{
-			"id":     uuid.New().String(),
-			"author": map[string]interface{}{"role": "user"},
-			"content": []map[string]interface{}{
-				{"type": "text", "text": reqBody.Message},
+			"id":          uuid.New().String(),
+			"author":      map[string]interface{}{"role": "user"},
+			"create_time": now,
+			"content": map[string]interface{}{
+				"content_type": "text",
+				"parts":        []string{reqBody.Message},
+			},
+			"metadata": map[string]interface{}{
+				"serialization_metadata": map[string]interface{}{
+					"custom_symbol_offsets": []interface{}{},
+				},
 			},
 		}
 	}
 
-	// Build the upstream request body.
+	// Default model to "auto" when empty (R-1.3: empty model causes 422).
+	model := reqBody.Model
+	if model == "" {
+		model = "auto"
+	}
+
+	// Build the upstream request body matching chatgpt.com's current /backend-api/f/conversation format.
 	upstreamBody := map[string]interface{}{
-		"action":            "next",
-		"messages":          []map[string]interface{}{userMessage},
-		"model":             reqBody.Model,
-		"parent_message_id": uuid.New().String(),
-		"stream":            reqBody.Stream,
+		"action":                       "next",
+		"messages":                     []map[string]interface{}{userMessage},
+		"model":                        model,
+		"parent_message_id":            uuid.New().String(),
+		"stream":                       reqBody.Stream,
+		"timezone_offset_min":          0,
+		"timezone":                     "UTC",
+		"history_and_training_disabled": true,
+		"conversation_mode": map[string]interface{}{
+			"kind": "primary_assistant",
+		},
+		"supports_buffering":       true,
+		"supported_encodings":      []string{"v1"},
+		"system_hints":             []interface{}{},
+		"enable_message_followups": true,
+		"paragen_cot_summary_display_override": "allow",
+		"force_parallel_switch":                "auto",
+		"client_contextual_info": map[string]interface{}{
+			"is_dark_mode":      true,
+			"time_since_loaded": 0,
+			"page_height":       1000,
+			"page_width":        1000,
+			"pixel_ratio":       1,
+			"screen_height":     1000,
+			"screen_width":      1000,
+			"app_name":          "chatgpt.com",
+		},
 	}
 	if reqBody.ConversationID != "" {
 		upstreamBody["conversation_id"] = reqBody.ConversationID

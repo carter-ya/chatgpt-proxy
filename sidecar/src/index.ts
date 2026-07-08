@@ -1,7 +1,7 @@
 import express, { type Request, type Response } from 'express';
 import { chromium, type BrowserContext, type Page } from 'playwright';
 import * as path from 'path';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 
 // ---- Configuration ----
 
@@ -197,6 +197,145 @@ async function initializeBrowser(): Promise<void> {
   console.log('[sidecar] Browser ready — accepting proxy requests.');
 }
 
+// ---- Sentinel Token Helpers ----
+
+// checkDifficulty verifies that the first difficulty bits of hash are all 0.
+function checkDifficulty(hash: Uint8Array, difficulty: number): boolean {
+  const fullBytes = Math.floor(difficulty / 8);
+  const remBits = difficulty % 8;
+
+  for (let i = 0; i < fullBytes; i++) {
+    if (hash[i] !== 0) return false;
+  }
+
+  if (remBits > 0 && fullBytes < hash.length) {
+    if ((hash[fullBytes] >> (8 - remBits)) !== 0) return false;
+  }
+
+  return true;
+}
+
+// solvePoW finds a nonce such that SHA256(seed+nonce) has the first difficulty bits set to 0.
+// Returns the nonce and the hex-encoded hash as the answer.
+function solvePoW(seed: string, difficulty: number): { nonce: number; answer: string } {
+  for (let nonce = 0; nonce < Number.MAX_SAFE_INTEGER; nonce++) {
+    const input = seed + nonce.toString();
+    const hash = createHash('sha256').update(input).digest();
+
+    if (checkDifficulty(hash, difficulty)) {
+      return { nonce, answer: hash.toString('hex') };
+    }
+  }
+
+  return { nonce: 0, answer: '' };
+}
+
+// fetchSentinelTokens executes the sentinel flow (prepare → PoW → finalize)
+// inside the Chrome browser context so the requests carry the correct TLS fingerprint.
+// Returns sentinel headers to inject, or null on failure (non-fatal).
+async function fetchSentinelTokens(page: Page): Promise<Record<string, string> | null> {
+  try {
+    // Step 1 — prepare
+    const prepResult = await page.evaluate(async () => {
+      try {
+        const resp = await fetch('/backend-api/sentinel/chat-requirements/prepare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ persona: 'chatgpt-freeaccount' }),
+          credentials: 'include' as RequestCredentials,
+        });
+        if (!resp.ok) {
+          const body = await resp.text();
+          return { error: `prepare status ${resp.status}: ${body}` };
+        }
+        const data = await resp.json();
+        return { data };
+      } catch (err: any) {
+        return { error: `prepare fetch failed: ${err.message || String(err)}` };
+      }
+    });
+
+    if ('error' in prepResult) {
+      console.warn('[sidecar] Sentinel prepare failed:', prepResult.error);
+      return null;
+    }
+
+    const prepData = prepResult.data as any;
+
+    // Step 2 — compute PoW in Node.js (avoid blocking the browser evaluate loop)
+    const difficulty = parseInt(prepData.proofofwork.difficulty, 10);
+    if (isNaN(difficulty) || difficulty <= 0) {
+      console.warn('[sidecar] Sentinel PoW: invalid difficulty', prepData.proofofwork.difficulty);
+      return null;
+    }
+    const { answer } = solvePoW(prepData.proofofwork.seed, difficulty);
+
+    if (!answer) {
+      console.warn('[sidecar] Sentinel PoW: failed to find solution');
+      return null;
+    }
+
+    // Step 3 — finalize
+    const finalizeBody: any = {
+      prepare_token: prepData.prepare_token,
+      proofofwork: {
+        seed: prepData.proofofwork.seed,
+        difficulty: prepData.proofofwork.difficulty,
+        answer,
+      },
+      turnstile: {},
+    };
+
+    if (prepData.turnstile?.required) {
+      finalizeBody.turnstile = {
+        token: 'cftoken',
+        iframe: false,
+        challenge: '',
+        response: 'AAAA',
+        action: 'response',
+        theme: 'dark',
+      };
+    }
+
+    const finResult = await page.evaluate(async (finBody) => {
+      try {
+        const resp = await fetch('/backend-api/sentinel/chat-requirements/finalize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(finBody),
+          credentials: 'include' as RequestCredentials,
+        });
+        if (!resp.ok) {
+          const body = await resp.text();
+          return { error: `finalize status ${resp.status}: ${body}` };
+        }
+        const data = await resp.json();
+        return { data };
+      } catch (err: any) {
+        return { error: `finalize fetch failed: ${err.message || String(err)}` };
+      }
+    }, finalizeBody);
+
+    if ('error' in finResult) {
+      console.warn('[sidecar] Sentinel finalize failed:', finResult.error);
+      return null;
+    }
+
+    const finData = finResult.data as any;
+
+    const headers: Record<string, string> = {
+      'openai-sentinel-chat-requirements-token': finData.token,
+      'openai-sentinel-proof-token': answer,
+    };
+
+    console.log('[sidecar] Sentinel tokens fetched successfully');
+    return headers;
+  } catch (err: any) {
+    console.warn('[sidecar] Sentinel fetch error (non-fatal):', err.message || String(err));
+    return null;
+  }
+}
+
 // ---- Proxy Handlers ----
 
 interface ProxyRequestBody {
@@ -221,6 +360,14 @@ async function handleNonStreamProxy(
 
   // Decode base64-encoded body from Go before passing to browser fetch()
   const decodedBody = body ? Buffer.from(body, 'base64').toString('utf-8') : undefined;
+
+  // Fetch and inject sentinel tokens for conversation requests (non-fatal).
+  if (upstreamPath.startsWith('/backend-api/f/conversation')) {
+    const sentinelHeaders = await fetchSentinelTokens(page);
+    if (sentinelHeaders) {
+      Object.assign(headers, sentinelHeaders);
+    }
+  }
 
   const result = await page.evaluate(
     async ({ method, path: p, headers: hdrs, body: b }) => {
@@ -276,6 +423,15 @@ async function handleStreamProxy(
 
   // Decode base64-encoded body from Go before passing to browser fetch()
   const decodedBody = body ? Buffer.from(body, 'base64').toString('utf-8') : undefined;
+
+  // Fetch and inject sentinel tokens for conversation requests (non-fatal).
+  if (upstreamPath.startsWith('/backend-api/f/conversation')) {
+    const sentinelHeaders = await fetchSentinelTokens(page);
+    if (sentinelHeaders) {
+      Object.assign(headers, sentinelHeaders);
+    }
+  }
+
 
   // Write SSE response headers immediately
   res.writeHead(200, {

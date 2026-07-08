@@ -18,7 +18,6 @@ import (
 	"chatgpt-proxy/backend/internal/handler"
 	"chatgpt-proxy/backend/internal/httpresp"
 	"chatgpt-proxy/backend/internal/proxy"
-	"chatgpt-proxy/backend/internal/sentinel"
 	"chatgpt-proxy/backend/internal/session"
 
 	"github.com/gin-contrib/cors"
@@ -53,7 +52,6 @@ func New(cfg *config.Config) (*App, error) {
 
 	authHandler := handler.NewAuthHandler(authSvc)
 
-	sentinelCache := sentinel.NewTokenCache(cfg.SentinelCacheTTL)
 	sessionManager, err := session.NewManager(queries, cfg.EncryptionKey)
 	if err != nil {
 		return nil, fmt.Errorf("初始化 session manager 失败: %w", err)
@@ -62,7 +60,7 @@ func New(cfg *config.Config) (*App, error) {
 	// 播种 session token：将配置文件中的 token 加密后写入数据库，重复启动不重复插入。
 	seedSessionTokens(context.Background(), cfg.SessionTokens, queries, sessionManager, cfg.EncryptionKey)
 
-	proxyClient := proxy.NewBrowserProxyClient(cfg.SidecarURL, sentinelCache, cfg.ChatGPTBaseURL)
+	proxyClient := proxy.NewBrowserProxyClient(cfg.SidecarURL, cfg.ChatGPTBaseURL)
 	proxyHandler := handler.NewProxyHandler(proxyClient, sessionManager, queries)
 
 	engine := gin.New()

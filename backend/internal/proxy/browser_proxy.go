@@ -7,11 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
-
-	"chatgpt-proxy/backend/internal/sentinel"
 )
 
 // SidecarProxyRequest 是发送给 Sidecar 代理端点的 JSON 请求体。
@@ -30,19 +27,19 @@ type SidecarProxyResponse struct {
 }
 
 // BrowserProxyClient 实现 ProxyClient 接口，将代理请求委托给 Playwright Sidecar。
+// sentinel token 获取已迁移至 Sidecar Chrome 端，Go 端不再管理 sentinelCache。
 type BrowserProxyClient struct {
 	sidecarURL    string
 	httpClient    *http.Client
-	sentinelCache *sentinel.TokenCache
 	baseURL       string
 }
 
 // NewBrowserProxyClient 创建一个新的 BrowserProxyClient。
-func NewBrowserProxyClient(sidecarURL string, sentinelCache *sentinel.TokenCache, baseURL string) *BrowserProxyClient {
+// sentinel token 现已由 Sidecar 通过 Chrome 自动获取，不再需要 Go 端的 sentinelCache。
+func NewBrowserProxyClient(sidecarURL string, baseURL string) *BrowserProxyClient {
 	return &BrowserProxyClient{
-		sidecarURL:    sidecarURL,
-		sentinelCache: sentinelCache,
-		baseURL:       baseURL,
+		sidecarURL: sidecarURL,
+		baseURL:    baseURL,
 		httpClient: &http.Client{
 			// 不设置 Timeout；流式请求可能长时间运行，
 			// 超时由调用方通过 context 管理。
@@ -78,19 +75,8 @@ func (c *BrowserProxyClient) BuildRequest(ctx context.Context, method, path, tok
 		Body: base64.StdEncoding.EncodeToString(bodyBytes),
 	}
 
-	// Inject sentinel tokens if available (non-fatal).
-	if c.sentinelCache != nil {
-		tokens, err := c.sentinelCache.GetOrFetch(ctx, c.baseURL, "")
-		if err == nil && tokens != nil {
-			sidecarReq.Headers["openai-sentinel-chat-requirements-token"] = tokens.ChatRequirementsToken
-			sidecarReq.Headers["openai-sentinel-proof-token"] = tokens.ProofToken
-			if tokens.TurnstileToken != "" {
-				sidecarReq.Headers["openai-sentinel-turnstile-token"] = tokens.TurnstileToken
-			}
-		} else if err != nil {
-			log.Printf("[browser_proxy] sentinel token 获取失败（非致命）: %v", err)
-		}
-	}
+	// sentinel token 获取已迁移至 Sidecar，由 Sidecar 通过 Chrome 自动注入。
+	// Sidecar 在代理 /backend-api/f/conversation 请求时会自动获取 sentinel。
 
 	sidecarReqBytes, err := json.Marshal(sidecarReq)
 	if err != nil {

@@ -202,23 +202,25 @@ async function initializeBrowser(): Promise<void> {
   console.log('[sidecar] Browser ready — accepting proxy requests.');
 
   // Pre-fetch sentinel tokens in the background (non-blocking).
-  refreshSentinelTokens(proxyPage!)
-    .catch((err) => {
-      console.warn(
-        '[sidecar] Initial sentinel pre-fetch failed (non-fatal, cache stays null):',
-        err.message || String(err),
-      );
-    });
+  // DISABLED: page.evaluate()→fetch() triggers Cloudflare 403 challenges that poison the Chrome session.
+  // refreshSentinelTokens(proxyPage!)
+  //   .catch((err) => {
+  //     console.warn(
+  //       '[sidecar] Initial sentinel pre-fetch failed (non-fatal, cache stays null):',
+  //       err.message || String(err),
+  //     );
+  //   });
 
   // Refresh sentinel tokens every 5 minutes.
-  sentinelRefreshTimer = setInterval(() => {
-    refreshSentinelTokens(proxyPage!).catch((err) => {
-      console.warn(
-        '[sidecar] Sentinel refresh failed (non-fatal):',
-        err.message || String(err),
-      );
-    });
-  }, 5 * 60 * 1000);
+  // DISABLED: page.evaluate()→fetch() triggers Cloudflare 403 challenges that poison the Chrome session.
+  // sentinelRefreshTimer = setInterval(() => {
+  //   refreshSentinelTokens(proxyPage!).catch((err) => {
+  //     console.warn(
+  //       '[sidecar] Sentinel refresh failed (non-fatal):',
+  //       err.message || String(err),
+  //     );
+  //   });
+  // }, 5 * 60 * 1000);
 }
 
 // ---- Sentinel Token Helpers ----

@@ -34,7 +34,22 @@ async function checkLoginStatus(page: Page): Promise<boolean> {
   // When not logged in, chatgpt.com shows a login button in the header/landing area.
   // This selector matches both <button> and <a> elements with "Log in" text.
   const loginButton = await page.$('button:has-text("Log in"), a:has-text("Log in")');
-  return loginButton === null;
+  if (loginButton !== null) {
+    return false;
+  }
+
+  // Final validation: verify the session is actually valid by making a test API call.
+  // Cookies may be present but stale — the page renders normally but API calls return 401.
+  // Use page.evaluate() so the fetch runs in the browser context with Chrome's cookies and TLS.
+  const apiCheck = await page.evaluate(async () => {
+    try {
+      const resp = await fetch('/backend-api/me');
+      return { status: resp.status };
+    } catch {
+      return { status: 0 };
+    }
+  });
+  return apiCheck.status === 200;
 }
 
 /** Launch a visible Chrome window, wait for the user to log in manually. */

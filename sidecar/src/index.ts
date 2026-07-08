@@ -94,6 +94,11 @@ async function initializeBrowser(): Promise<void> {
 
   proxyPage = await browserContext.newPage();
 
+  // Disable CSP via Chrome DevTools Protocol so that page.evaluate() + fetch()
+  // can run without being blocked by chatgpt.com's strict nonce-based CSP.
+  const cdp = await browserContext.newCDPSession(proxyPage);
+  await cdp.send('Page.setBypassCSP', { enabled: true });
+
   try {
     await proxyPage.goto(CHATGPT_URL, { waitUntil: 'load', timeout: 30000 });
 
@@ -131,6 +136,11 @@ async function initializeBrowser(): Promise<void> {
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
     proxyPage = await browserContext.newPage();
+
+    // Disable CSP via Chrome DevTools Protocol so that page.evaluate() + fetch()
+    // can run without being blocked by chatgpt.com's strict nonce-based CSP.
+    const cdp2 = await browserContext.newCDPSession(proxyPage);
+    await cdp2.send('Page.setBypassCSP', { enabled: true });
 
     // Verify the session is still good
     try {

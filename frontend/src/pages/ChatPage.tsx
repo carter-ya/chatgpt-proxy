@@ -25,6 +25,7 @@ export default function ChatPage() {
 
   const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const streamMsgIdRef = useRef<string | null>(null);
 
@@ -40,7 +41,7 @@ export default function ChatPage() {
       }));
       setMessages(msgs);
     } catch {
-      setMessages([]);
+      setLoadError('加载消息失败，请重试');
     } finally {
       setLoadingMessages(false);
     }
@@ -49,9 +50,11 @@ export default function ChatPage() {
   useEffect(() => {
     if (conversationId) {
       setMessages([]);
+      setLoadError(null);
       loadMessages(conversationId);
     } else {
       setMessages([]);
+      setLoadError(null);
     }
   }, [conversationId, loadMessages]);
 
@@ -125,6 +128,10 @@ export default function ChatPage() {
         <div className="welcome-screen">
           <div className="spinner" />
           <p style={{ marginTop: 16 }}>加载中...</p>
+        </div>
+      ) : loadError ? (
+        <div className="welcome-screen">
+          <p style={{ color: '#e53e3e', fontSize: 16 }}>{loadError}</p>
         </div>
       ) : messages.length === 0 ? (
         <div className="welcome-screen">

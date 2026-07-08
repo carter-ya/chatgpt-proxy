@@ -32,6 +32,10 @@ type Config struct {
 	EncryptionKey string `mapstructure:"encryption_key" default:"" validate:"required,base64"`
 	// ChatGPTBaseURL chatgpt.com 的基础 URL
 	ChatGPTBaseURL string `mapstructure:"chatgpt_base_url" default:"https://chatgpt.com" validate:"required,url"`
+	// SidecarURL Playwright Sidecar 服务地址
+	SidecarURL string `mapstructure:"sidecar_url" default:"http://127.0.0.1:3100" validate:"required,url"`
+	// SidecarPort Sidecar 端口（备用，当 SidecarURL 未配置时使用）
+	SidecarPort int `mapstructure:"sidecar_port" default:"3100" validate:"min=1,max=65535"`
 	// TokenCheckInterval session token 健康检查间隔
 	TokenCheckInterval time.Duration `mapstructure:"token_check_interval" default:"5m" validate:"min=30s"`
 }
@@ -53,6 +57,8 @@ func Load() (*Config, error) {
 	v.BindEnv("jwt_expiration")
 	v.BindEnv("encryption_key")
 	v.BindEnv("chatgpt_base_url")
+	v.BindEnv("sidecar_url")
+	v.BindEnv("sidecar_port")
 	v.BindEnv("token_check_interval")
 
 	var cfg Config

@@ -165,6 +165,13 @@ async function handleNonStreamProxy(
   body: string | undefined,
   res: Response,
 ): Promise<void> {
+  // Strip Authorization header — the browser context manages its own OAuth2 token
+  delete headers['authorization'];
+  delete headers['Authorization'];
+
+  // Decode base64-encoded body from Go before passing to browser fetch()
+  const decodedBody = body ? Buffer.from(body, 'base64').toString('utf-8') : undefined;
+
   const result = await page.evaluate(
     async ({ method, path: p, headers: hdrs, body: b }) => {
       const url = 'https://chatgpt.com' + p;
@@ -190,8 +197,13 @@ async function handleNonStreamProxy(
         body: respBody,
       };
     },
-    { method, path: upstreamPath, headers, body },
+    { method, path: upstreamPath, headers, body: decodedBody },
   );
+
+  // Re-encode response body as base64 for Go side
+  if (result.body) {
+    result.body = Buffer.from(result.body).toString('base64');
+  }
 
   res.json(result);
 }
@@ -207,6 +219,13 @@ async function handleStreamProxy(
   res: Response,
 ): Promise<void> {
   const streamId = randomUUID();
+
+  // Strip Authorization header — the browser context manages its own OAuth2 token
+  delete headers['authorization'];
+  delete headers['Authorization'];
+
+  // Decode base64-encoded body from Go before passing to browser fetch()
+  const decodedBody = body ? Buffer.from(body, 'base64').toString('utf-8') : undefined;
 
   // Write SSE response headers immediately
   res.writeHead(200, {
@@ -285,7 +304,7 @@ async function handleStreamProxy(
           );
         }
       },
-      { method, path: upstreamPath, headers, body, streamId },
+      { method, path: upstreamPath, headers, body: decodedBody, streamId },
     )
     .catch((err) => {
       console.error('[sidecar] Stream evaluate rejected:', err);

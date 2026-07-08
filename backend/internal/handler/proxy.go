@@ -19,6 +19,7 @@ import (
 	"chatgpt-proxy/backend/internal/session"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // ProxyHandler holds dependencies for proxy HTTP handlers.
@@ -133,7 +134,8 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 	var userMessage map[string]interface{}
 	if reqBody.AttachmentFileID != "" {
 		userMessage = map[string]interface{}{
-			"role": "user",
+			"id":     uuid.New().String(),
+			"author": map[string]interface{}{"role": "user"},
 			"content": []map[string]interface{}{
 				{"type": "text", "text": reqBody.Message},
 				{"type": "image_upload", "file_id": reqBody.AttachmentFileID},
@@ -141,18 +143,24 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 		}
 	} else {
 		userMessage = map[string]interface{}{
-			"role":    "user",
-			"content": reqBody.Message,
+			"id":     uuid.New().String(),
+			"author": map[string]interface{}{"role": "user"},
+			"content": []map[string]interface{}{
+				{"type": "text", "text": reqBody.Message},
+			},
 		}
 	}
 
 	// Build the upstream request body.
 	upstreamBody := map[string]interface{}{
-		"action":          "next",
-		"messages":        []map[string]interface{}{userMessage},
-		"model":           reqBody.Model,
-		"conversation_id": reqBody.ConversationID,
-		"stream":          reqBody.Stream,
+		"action":            "next",
+		"messages":          []map[string]interface{}{userMessage},
+		"model":             reqBody.Model,
+		"parent_message_id": uuid.New().String(),
+		"stream":            reqBody.Stream,
+	}
+	if reqBody.ConversationID != "" {
+		upstreamBody["conversation_id"] = reqBody.ConversationID
 	}
 	if reqBody.GenID != "" {
 		upstreamBody["gen_id"] = reqBody.GenID

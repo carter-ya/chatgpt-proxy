@@ -53,7 +53,7 @@ func New(cfg *config.Config) (*App, error) {
 
 	authHandler := handler.NewAuthHandler(authSvc)
 
-	_ = sentinel.NewTokenCache(cfg.SentinelCacheTTL) // 保留 sentinel cache 创建，由 Chrome 自动管理
+	sentinelCache := sentinel.NewTokenCache(cfg.SentinelCacheTTL)
 	sessionManager, err := session.NewManager(queries, cfg.EncryptionKey)
 	if err != nil {
 		return nil, fmt.Errorf("初始化 session manager 失败: %w", err)
@@ -62,7 +62,7 @@ func New(cfg *config.Config) (*App, error) {
 	// 播种 session token：将配置文件中的 token 加密后写入数据库，重复启动不重复插入。
 	seedSessionTokens(context.Background(), cfg.SessionTokens, queries, sessionManager, cfg.EncryptionKey)
 
-	proxyClient := proxy.NewBrowserProxyClient(cfg.SidecarURL)
+	proxyClient := proxy.NewBrowserProxyClient(cfg.SidecarURL, sentinelCache, cfg.ChatGPTBaseURL)
 	proxyHandler := handler.NewProxyHandler(proxyClient, sessionManager, queries)
 
 	engine := gin.New()

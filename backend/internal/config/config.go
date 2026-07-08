@@ -4,10 +4,14 @@ package config
 
 import (
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	go_default "github.com/exc-works/go-default"
 	"github.com/go-playground/validator/v10"
+	"github.com/joho/godotenv"
 	"github.com/spf13/viper"
 )
 
@@ -42,6 +46,11 @@ type Config struct {
 
 // Load 从环境变量加载配置，注入默认值并校验。
 func Load() (*Config, error) {
+	// 自动加载项目根目录的 .env 文件。
+	// godotenv.Load 在变量已存在时不会覆盖，因此显式设置的环境变量（如 targets.json 的 env 块）
+	// 优先于 .env 中的值，.env 仅作为回退默认值。
+	loadEnvFile()
+
 	v := viper.New()
 	v.SetEnvPrefix("XIAOMING")
 	v.AutomaticEnv()
@@ -75,7 +84,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: 校验失败: %w", err)
 	}
 
-	// 显式检查必需配置项的空值。
+		// 显式检查必需配置项的空值。
 	// validator 的 required tag 对 string 类型的零值（空字符串）有效，
 	// 但 DatabaseURL 没有 required tag，且使用 default:"" 仅为语义占位。
 	// 显式检查确保缺失关键配置时输出清晰的错误信息。
@@ -87,4 +96,19 @@ func Load() (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// loadEnvFile 尝试从项目根目录加载 .env 文件。
+// 使用 godotenv.Load 在变量未设置时注入，已存在的环境变量不会被覆盖。
+// .env 文件路径固定为 ../.env（相对于 backend/ 工作目录）。
+func loadEnvFile() {
+	// 定位项目根目录的 .env 文件
+	envPath := filepath.Join("..", ".env")
+	if _, err := os.Stat(envPath); err == nil {
+		if err := godotenv.Load(envPath); err != nil {
+			log.Printf("警告: 无法加载 .env 文件 (%s): %v", envPath, err)
+		}
+	} else {
+		log.Printf("未找到 .env 文件 (%s)，跳过自动加载", envPath)
+	}
 }

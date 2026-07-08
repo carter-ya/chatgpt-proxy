@@ -1,0 +1,405 @@
+import express, { type Request, type Response } from 'express';
+import { chromium, type BrowserContext, type Page } from 'playwright';
+import * as path from 'path';
+import { randomUUID } from 'crypto';
+
+// ---- Configuration ----
+
+const PORT = parseInt(process.env.XIAOMING_SIDECAR_PORT || '3100', 10);
+const CHATGPT_URL = 'https://chatgpt.com';
+const LOGIN_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const LOGIN_POLL_INTERVAL_MS = 5000; // 5 seconds
+
+// ---- Global State ----
+
+let browserContext: BrowserContext | null = null;
+let proxyPage: Page | null = null;
+let isReady = false;
+let readyError: string | null = null;
+
+// Track active SSE streams so the exposed browser callback can route chunks
+// to the correct Express response.
+const activeStreams = new Map<string, Response>();
+
+// ---- Helpers ----
+
+/** Check whether the current page shows a login button (not logged in). */
+async function checkLoginStatus(page: Page): Promise<boolean> {
+  // When not logged in, chatgpt.com shows a login button in the header/landing area.
+  // This selector matches both <button> and <a> elements with "Log in" text.
+  const loginButton = await page.$('button:has-text("Log in"), a:has-text("Log in")');
+  return loginButton === null;
+}
+
+/** Launch a visible Chrome window, wait for the user to log in manually. */
+async function waitForManualLogin(userDataDir: string): Promise<void> {
+  const loginContext = await chromium.launchPersistentContext(userDataDir, {
+    headless: false,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+
+  const loginPage = await loginContext.newPage();
+  await loginPage.goto(CHATGPT_URL, { waitUntil: 'networkidle', timeout: 30000 });
+
+  console.log('[sidecar] Waiting for manual login (timeout: 5 minutes)...');
+  console.log('[sidecar] Please log in to chatgpt.com in the opened Chrome window.');
+
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < LOGIN_TIMEOUT_MS) {
+    await new Promise((resolve) => setTimeout(resolve, LOGIN_POLL_INTERVAL_MS));
+
+    try {
+      await loginPage.reload({ waitUntil: 'networkidle', timeout: 15000 });
+    } catch {
+      // Reload may fail if the page is navigating; retry on next poll.
+      continue;
+    }
+
+    const loggedIn = await checkLoginStatus(loginPage);
+    if (loggedIn) {
+      console.log('[sidecar] Manual login detected!');
+      await loginContext.close();
+      return;
+    }
+
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    console.log(`[sidecar] Still waiting for login... (${elapsed}s elapsed)`);
+  }
+
+  await loginContext.close();
+  throw new Error('Manual login timed out after 5 minutes');
+}
+
+// ---- Browser Initialization ----
+
+async function initializeBrowser(): Promise<void> {
+  const userDataDir = path.resolve('./.browser-profile');
+  console.log(`[sidecar] Browser profile directory: ${userDataDir}`);
+
+  // Step 1 — check existing session in headless mode
+  console.log('[sidecar] Launching headless Chrome to check login status...');
+  browserContext = await chromium.launchPersistentContext(userDataDir, {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+
+  proxyPage = await browserContext.newPage();
+
+  try {
+    await proxyPage.goto(CHATGPT_URL, { waitUntil: 'networkidle', timeout: 30000 });
+  } catch (err) {
+    console.warn('[sidecar] Initial navigation to chatgpt.com failed:', err);
+  }
+
+  const loggedIn = await checkLoginStatus(proxyPage);
+
+  if (loggedIn) {
+    console.log('[sidecar] Already logged in to chatgpt.com — reusing existing session.');
+  } else {
+    console.log('[sidecar] Not logged in. Opening visible browser for manual login...');
+
+    // Close current headless context
+    await browserContext.close();
+    browserContext = null;
+    proxyPage = null;
+
+    // Open visible browser, wait for user to log in
+    await waitForManualLogin(userDataDir);
+
+    // Relaunch headless — the persistent profile now has valid cookies
+    console.log('[sidecar] Login successful. Switching back to headless mode...');
+    browserContext = await chromium.launchPersistentContext(userDataDir, {
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    });
+    proxyPage = await browserContext.newPage();
+
+    // Verify the session is still good
+    try {
+      await proxyPage.goto(CHATGPT_URL, { waitUntil: 'networkidle', timeout: 30000 });
+    } catch (err) {
+      console.warn('[sidecar] Post-login navigation to chatgpt.com failed:', err);
+    }
+
+    const stillLoggedIn = await checkLoginStatus(proxyPage);
+    if (!stillLoggedIn) {
+      throw new Error('Login verification failed after manual login — session not persisted');
+    }
+  }
+
+  // Expose the stream-chunk callback into the browser page.
+  // The browser side calls this with (streamId, chunk, done) for each SSE chunk.
+  await proxyPage.exposeFunction(
+    '__sidecarStreamChunk',
+    (streamId: string, chunk: string, done: boolean) => {
+      const res = activeStreams.get(streamId);
+      if (!res || res.writableEnded) return;
+      if (chunk) res.write(chunk);
+      if (done) {
+        res.end();
+        activeStreams.delete(streamId);
+      }
+    },
+  );
+
+  isReady = true;
+  console.log('[sidecar] Browser ready — accepting proxy requests.');
+}
+
+// ---- Proxy Handlers ----
+
+interface ProxyRequestBody {
+  method?: string;
+  path: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+/** Non-streaming proxy: evaluate fetch() in browser, return full response. */
+async function handleNonStreamProxy(
+  page: Page,
+  method: string,
+  upstreamPath: string,
+  headers: Record<string, string>,
+  body: string | undefined,
+  res: Response,
+): Promise<void> {
+  const result = await page.evaluate(
+    async ({ method, path: p, headers: hdrs, body: b }) => {
+      const url = 'https://chatgpt.com' + p;
+      const fetchOptions: RequestInit = {
+        method: method || 'POST',
+        headers: hdrs || {},
+        credentials: 'include' as RequestCredentials,
+      };
+      if (b !== undefined && b !== null && method !== 'GET' && method !== 'HEAD') {
+        fetchOptions.body = b;
+      }
+
+      const resp = await fetch(url, fetchOptions);
+      const respHeaders: Record<string, string> = {};
+      resp.headers.forEach((value: string, key: string) => {
+        respHeaders[key] = value;
+      });
+      const respBody = await resp.text();
+
+      return {
+        status: resp.status,
+        headers: respHeaders,
+        body: respBody,
+      };
+    },
+    { method, path: upstreamPath, headers, body },
+  );
+
+  res.json(result);
+}
+
+/** Streaming SSE proxy: evaluate fetch() in browser, relay chunks via exposed callback. */
+async function handleStreamProxy(
+  page: Page,
+  method: string,
+  upstreamPath: string,
+  headers: Record<string, string>,
+  body: string | undefined,
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const streamId = randomUUID();
+
+  // Write SSE response headers immediately
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+
+  activeStreams.set(streamId, res);
+
+  // Clean up on client disconnect
+  req.on('close', () => {
+    activeStreams.delete(streamId);
+  });
+
+  // Fire-and-forget: the browser evaluate runs in the background and calls
+  // __sidecarStreamChunk for each chunk.
+  page
+    .evaluate(
+      async ({ method, path: p, headers: hdrs, body: b, streamId: sid }) => {
+        const win = window as any;
+        try {
+          const url = 'https://chatgpt.com' + p;
+          const fetchOptions: RequestInit = {
+            method: method || 'POST',
+            headers: hdrs || {},
+            credentials: 'include' as RequestCredentials,
+          };
+          if (b !== undefined && b !== null && method !== 'GET' && method !== 'HEAD') {
+            fetchOptions.body = b;
+          }
+
+          const resp = await fetch(url, fetchOptions);
+
+          if (!resp.ok) {
+            const errorBody = await resp.text();
+            await win.__sidecarStreamChunk(
+              sid,
+              `event: error\ndata: HTTP ${resp.status}: ${errorBody}\n\n`,
+              true,
+            );
+            return;
+          }
+
+          if (!resp.body) {
+            await win.__sidecarStreamChunk(
+              sid,
+              'event: error\ndata: No response body\n\n',
+              true,
+            );
+            return;
+          }
+
+          const reader = resp.body.getReader();
+          const decoder = new TextDecoder();
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const text = decoder.decode(value, { stream: true });
+            if (text) await win.__sidecarStreamChunk(sid, text, false);
+          }
+
+          // Flush any remaining bytes
+          const remaining = decoder.decode();
+          if (remaining) await win.__sidecarStreamChunk(sid, remaining, false);
+
+          // Signal completion
+          await win.__sidecarStreamChunk(sid, '', true);
+        } catch (err: any) {
+          await win.__sidecarStreamChunk(
+            sid,
+            `event: error\ndata: ${err.message || 'Unknown error'}\n\n`,
+            true,
+          );
+        }
+      },
+      { method, path: upstreamPath, headers, body, streamId },
+    )
+    .catch((err) => {
+      console.error('[sidecar] Stream evaluate rejected:', err);
+      const res = activeStreams.get(streamId);
+      if (res && !res.writableEnded) {
+        res.write(`event: error\ndata: ${err.message}\n\n`);
+        res.end();
+        activeStreams.delete(streamId);
+      }
+    });
+}
+
+// ---- Express Server ----
+
+function startServer(): void {
+  const app = express();
+
+  // Parse JSON bodies — the outer envelope is JSON; the inner "body" field
+  // is a pre-serialized string that we pass through untouched.
+  app.use(express.json({ limit: '10mb' }));
+
+  // ---- GET /health ----
+  app.get('/health', (_req: Request, res: Response) => {
+    if (isReady) {
+      res.json({ ok: true });
+    } else {
+      res.status(503).json({ ok: false, error: readyError || 'Not ready' });
+    }
+  });
+
+  // ---- POST /api/proxy ----
+  app.post('/api/proxy', async (req: Request, res: Response) => {
+    if (!isReady || !proxyPage) {
+      res.status(503).json({ error: 'Sidecar not ready' });
+      return;
+    }
+
+    const isStream = req.query.stream === 'true';
+    const { method, path: upstreamPath, headers, body } = req.body as ProxyRequestBody;
+
+    if (!upstreamPath) {
+      res.status(400).json({ error: 'Missing "path" field in request body' });
+      return;
+    }
+
+    try {
+      if (isStream) {
+        await handleStreamProxy(
+          proxyPage,
+          method || 'POST',
+          upstreamPath,
+          headers || {},
+          body,
+          req,
+          res,
+        );
+      } else {
+        await handleNonStreamProxy(
+          proxyPage,
+          method || 'POST',
+          upstreamPath,
+          headers || {},
+          body,
+          res,
+        );
+      }
+    } catch (err: any) {
+      console.error('[sidecar] Proxy error:', err);
+      if (!res.headersSent) {
+        res.status(502).json({ error: 'Proxy request failed', detail: String(err) });
+      }
+    }
+  });
+
+  app.listen(PORT, '127.0.0.1', () => {
+    console.log(`[sidecar] HTTP server listening on 127.0.0.1:${PORT}`);
+  });
+}
+
+// ---- Main ----
+
+async function main(): Promise<void> {
+  console.log('[sidecar] Starting Playwright sidecar...');
+  console.log(`[sidecar] Port: ${PORT}`);
+
+  try {
+    await initializeBrowser();
+  } catch (err) {
+    console.error('[sidecar] Browser initialization failed:', err);
+    readyError = String(err);
+    // Start the server anyway — /health will report unhealthy.
+  }
+
+  startServer();
+}
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('[sidecar] Shutting down...');
+  if (browserContext) {
+    await browserContext.close();
+  }
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('[sidecar] Shutting down...');
+  if (browserContext) {
+    await browserContext.close();
+  }
+  process.exit(0);
+});
+
+main().catch((err) => {
+  console.error('[sidecar] Fatal error:', err);
+  process.exit(1);
+});

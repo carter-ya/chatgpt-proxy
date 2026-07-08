@@ -395,10 +395,10 @@ interface ProxyRequestBody {
   body?: string;
 }
 
-/** Non-streaming proxy: uses page.route() + route.fetch() so the outgoing request
- *  goes through Chrome's native network stack (indistinguishable from real browser
- *  requests) — avoids Cloudflare 403 "Unusual activity" detection that page.evaluate()
- *  + fetch() triggers for POST requests. */
+/** Non-streaming proxy: uses page.evaluate()+fetch() to send the request from
+ *  the browser page context (same pattern as handleStreamProxy and checkLoginStatus).
+ *  page.route()+route.fetch() was tried but Cloudflare silently drops CDP-intercepted
+ *  requests (TCP timeout, no HTTP response). */
 async function handleNonStreamProxy(
   page: Page,
   method: string,
@@ -421,74 +421,52 @@ async function handleNonStreamProxy(
 
   const targetUrl = 'https://chatgpt.com' + upstreamPath;
 
-  // Wrap the route capture in a Promise so TypeScript's control-flow analysis
-  // can track the assignment through the async callback.
-  const capturedResult = await new Promise<{ status: number; headers: Record<string, string>; body: string }>(
-    async (resolve, reject) => {
+  // Execute fetch() inside the browser page context so the request uses Chrome's
+  // cookies, TLS fingerprint, and HTTP/2 settings — same pattern as handleStreamProxy
+  // and checkLoginStatus (CSP bypass is already enabled via CDP).
+  const result = await page.evaluate(
+    async ({ url, method: m, headers: hdrs, body: b }) => {
       try {
-        // Register a route handler that intercepts the request at the CDP network layer.
-        // route.fetch() performs the request through Chrome's native network stack,
-        // which is indistinguishable from real user-driven browser requests.
-        await page.route(targetUrl, async (route) => {
-          try {
-            const response = await route.fetch();
+        const fetchOptions: RequestInit = {
+          method: m || 'POST',
+          headers: hdrs || {},
+          credentials: 'include' as RequestCredentials,
+        };
+        if (b !== undefined && b !== null && m !== 'GET' && m !== 'HEAD') {
+          fetchOptions.body = b;
+        }
+        const resp = await fetch(url, fetchOptions);
 
-            const respHeaders: Record<string, string> = {};
-            for (const [key, value] of Object.entries(response.headers())) {
-              respHeaders[key] = value;
-            }
-
-            const respBody = await response.text();
-
-            // Fulfill the intercepted request with the response so the page's
-            // evaluate-side fetch() resolves cleanly.
-            await route.fulfill({
-              status: response.status(),
-              headers: response.headers(),
-              body: respBody,
-            });
-
-            resolve({
-              status: response.status(),
-              headers: respHeaders,
-              body: respBody,
-            });
-          } catch (err) {
-            reject(err);
-          }
+        const respHeaders: Record<string, string> = {};
+        resp.headers.forEach((value: string, key: string) => {
+          respHeaders[key] = value;
         });
 
-        // Trigger the request from the page context — the registered route handler
-        // intercepts this and uses route.fetch() for the actual network request.
-        await page.evaluate(
-          async ({ url, method: m, headers: hdrs, body: b }) => {
-            const fetchOptions: RequestInit = {
-              method: m || 'POST',
-              headers: hdrs || {},
-              credentials: 'include' as RequestCredentials,
-            };
-            if (b !== undefined && b !== null && m !== 'GET' && m !== 'HEAD') {
-              fetchOptions.body = b;
-            }
-            await fetch(url, fetchOptions);
-          },
-          { url: targetUrl, method, headers, body: decodedBody },
-        );
-      } catch (err) {
-        reject(err);
-      } finally {
-        // Clean up the route to prevent leaks.
-        await page.unroute(targetUrl);
+        const respBody = await resp.text();
+
+        return {
+          status: resp.status,
+          headers: respHeaders,
+          body: respBody,
+        };
+      } catch (err: any) {
+        return {
+          status: 0,
+          headers: {} as Record<string, string>,
+          body: '',
+          error: err.message || String(err),
+        };
       }
     },
+    { url: targetUrl, method, headers, body: decodedBody },
   );
 
   // Re-encode response body as base64 for Go side
-  if (capturedResult.body) {
-    capturedResult.body = Buffer.from(capturedResult.body).toString('base64');
+  if (result.body) {
+    result.body = Buffer.from(result.body).toString('base64');
   }
 
-  res.json(capturedResult);
+  res.json(result);
 }
 
 /** Streaming SSE proxy: evaluate fetch() in browser, relay chunks via exposed callback. */

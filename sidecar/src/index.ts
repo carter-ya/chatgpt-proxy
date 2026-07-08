@@ -21,6 +21,11 @@ let readyError: string | null = null;
 // to the correct Express response.
 const activeStreams = new Map<string, Response>();
 
+// Sentinel token cache — pre-fetched on startup, refreshed every 5 minutes.
+// null means the initial fetch failed; proxy requests proceed without sentinel (non-fatal).
+let sentinelCache: Record<string, string> | null = null;
+let sentinelRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
 // ---- Helpers ----
 
 /** Check whether the current page shows a login button (not logged in). */
@@ -195,6 +200,25 @@ async function initializeBrowser(): Promise<void> {
 
   isReady = true;
   console.log('[sidecar] Browser ready — accepting proxy requests.');
+
+  // Pre-fetch sentinel tokens in the background (non-blocking).
+  refreshSentinelTokens(proxyPage!)
+    .catch((err) => {
+      console.warn(
+        '[sidecar] Initial sentinel pre-fetch failed (non-fatal, cache stays null):',
+        err.message || String(err),
+      );
+    });
+
+  // Refresh sentinel tokens every 5 minutes.
+  sentinelRefreshTimer = setInterval(() => {
+    refreshSentinelTokens(proxyPage!).catch((err) => {
+      console.warn(
+        '[sidecar] Sentinel refresh failed (non-fatal):',
+        err.message || String(err),
+      );
+    });
+  }, 5 * 60 * 1000);
 }
 
 // ---- Sentinel Token Helpers ----
@@ -230,13 +254,37 @@ function solvePoW(seed: string, difficulty: number): { nonce: number; answer: st
   return { nonce: 0, answer: '' };
 }
 
-// fetchSentinelTokens executes the sentinel flow (prepare → PoW → finalize)
-// inside the Chrome browser context so the requests carry the correct TLS fingerprint.
-// Returns sentinel headers to inject, or null on failure (non-fatal).
-async function fetchSentinelTokens(page: Page): Promise<Record<string, string> | null> {
-  try {
-    // Step 1 — prepare
-    const prepResult = await page.evaluate(async () => {
+// Hard timeout guard for page.evaluate() calls — prevents indefinite hangs
+// when the browser-side fetch hits a Cloudflare 403 challenge page.
+const SENTINEL_TIMEOUT_MS = 10_000;
+
+function withSentinelTimeout<T>(promise: Promise<T>, step: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error(`sentinel ${step} timed out after ${SENTINEL_TIMEOUT_MS / 1000}s`)),
+        SENTINEL_TIMEOUT_MS,
+      ),
+    ),
+  ]);
+}
+
+// fetchSentinelTokens returns the cached sentinel headers — it NEVER blocks.
+// The cache is populated on startup and refreshed every 5 minutes in the background.
+// Returns null when the cache hasn't been populated yet or the initial fetch failed.
+function fetchSentinelTokens(): Record<string, string> | null {
+  return sentinelCache;
+}
+
+// refreshSentinelTokens executes the sentinel flow (prepare → PoW → finalize)
+// inside the Chrome browser context and updates the module-level sentinelCache.
+// Each page.evaluate() call is guarded by a hard 10s timeout to prevent indefinite hangs.
+// Called once on startup and periodically via setInterval.
+async function refreshSentinelTokens(page: Page): Promise<void> {
+  // Step 1 — prepare (with 10s timeout)
+  const prepResult = await withSentinelTimeout(
+    page.evaluate(async () => {
       try {
         const resp = await fetch('/backend-api/sentinel/chat-requirements/prepare', {
           method: 'POST',
@@ -253,51 +301,54 @@ async function fetchSentinelTokens(page: Page): Promise<Record<string, string> |
       } catch (err: any) {
         return { error: `prepare fetch failed: ${err.message || String(err)}` };
       }
-    });
+    }),
+    'prepare',
+  );
 
-    if ('error' in prepResult) {
-      console.warn('[sidecar] Sentinel prepare failed:', prepResult.error);
-      return null;
-    }
+  if ('error' in prepResult) {
+    console.warn('[sidecar] Sentinel prepare failed:', prepResult.error);
+    return;
+  }
 
-    const prepData = prepResult.data as any;
+  const prepData = prepResult.data as any;
 
-    // Step 2 — compute PoW in Node.js (avoid blocking the browser evaluate loop)
-    const difficulty = parseInt(prepData.proofofwork.difficulty, 10);
-    if (isNaN(difficulty) || difficulty <= 0) {
-      console.warn('[sidecar] Sentinel PoW: invalid difficulty', prepData.proofofwork.difficulty);
-      return null;
-    }
-    const { answer } = solvePoW(prepData.proofofwork.seed, difficulty);
+  // Step 2 — compute PoW in Node.js (avoid blocking the browser evaluate loop)
+  const difficulty = parseInt(prepData.proofofwork.difficulty, 10);
+  if (isNaN(difficulty) || difficulty <= 0) {
+    console.warn('[sidecar] Sentinel PoW: invalid difficulty', prepData.proofofwork.difficulty);
+    return;
+  }
+  const { answer } = solvePoW(prepData.proofofwork.seed, difficulty);
 
-    if (!answer) {
-      console.warn('[sidecar] Sentinel PoW: failed to find solution');
-      return null;
-    }
+  if (!answer) {
+    console.warn('[sidecar] Sentinel PoW: failed to find solution');
+    return;
+  }
 
-    // Step 3 — finalize
-    const finalizeBody: any = {
-      prepare_token: prepData.prepare_token,
-      proofofwork: {
-        seed: prepData.proofofwork.seed,
-        difficulty: prepData.proofofwork.difficulty,
-        answer,
-      },
-      turnstile: {},
+  // Step 3 — finalize (with 10s timeout)
+  const finalizeBody: any = {
+    prepare_token: prepData.prepare_token,
+    proofofwork: {
+      seed: prepData.proofofwork.seed,
+      difficulty: prepData.proofofwork.difficulty,
+      answer,
+    },
+    turnstile: {},
+  };
+
+  if (prepData.turnstile?.required) {
+    finalizeBody.turnstile = {
+      token: 'cftoken',
+      iframe: false,
+      challenge: '',
+      response: 'AAAA',
+      action: 'response',
+      theme: 'dark',
     };
+  }
 
-    if (prepData.turnstile?.required) {
-      finalizeBody.turnstile = {
-        token: 'cftoken',
-        iframe: false,
-        challenge: '',
-        response: 'AAAA',
-        action: 'response',
-        theme: 'dark',
-      };
-    }
-
-    const finResult = await page.evaluate(async (finBody) => {
+  const finResult = await withSentinelTimeout(
+    page.evaluate(async (finBody) => {
       try {
         const resp = await fetch('/backend-api/sentinel/chat-requirements/finalize', {
           method: 'POST',
@@ -314,26 +365,23 @@ async function fetchSentinelTokens(page: Page): Promise<Record<string, string> |
       } catch (err: any) {
         return { error: `finalize fetch failed: ${err.message || String(err)}` };
       }
-    }, finalizeBody);
+    }, finalizeBody),
+    'finalize',
+  );
 
-    if ('error' in finResult) {
-      console.warn('[sidecar] Sentinel finalize failed:', finResult.error);
-      return null;
-    }
-
-    const finData = finResult.data as any;
-
-    const headers: Record<string, string> = {
-      'openai-sentinel-chat-requirements-token': finData.token,
-      'openai-sentinel-proof-token': answer,
-    };
-
-    console.log('[sidecar] Sentinel tokens fetched successfully');
-    return headers;
-  } catch (err: any) {
-    console.warn('[sidecar] Sentinel fetch error (non-fatal):', err.message || String(err));
-    return null;
+  if ('error' in finResult) {
+    console.warn('[sidecar] Sentinel finalize failed:', finResult.error);
+    return;
   }
+
+  const finData = finResult.data as any;
+
+  sentinelCache = {
+    'openai-sentinel-chat-requirements-token': finData.token,
+    'openai-sentinel-proof-token': answer,
+  };
+
+  console.log('[sidecar] Sentinel tokens fetched and cached successfully');
 }
 
 // ---- Proxy Handlers ----
@@ -361,12 +409,9 @@ async function handleNonStreamProxy(
   // Decode base64-encoded body from Go before passing to browser fetch()
   const decodedBody = body ? Buffer.from(body, 'base64').toString('utf-8') : undefined;
 
-  // Fetch and inject sentinel tokens for conversation requests (non-fatal).
-  if (upstreamPath.startsWith('/backend-api/f/conversation')) {
-    const sentinelHeaders = await fetchSentinelTokens(page);
-    if (sentinelHeaders) {
-      Object.assign(headers, sentinelHeaders);
-    }
+  // Inject cached sentinel tokens for conversation requests (non-blocking, non-fatal).
+  if (upstreamPath.startsWith('/backend-api/f/conversation') && sentinelCache) {
+    Object.assign(headers, sentinelCache);
   }
 
   const result = await page.evaluate(
@@ -424,14 +469,10 @@ async function handleStreamProxy(
   // Decode base64-encoded body from Go before passing to browser fetch()
   const decodedBody = body ? Buffer.from(body, 'base64').toString('utf-8') : undefined;
 
-  // Fetch and inject sentinel tokens for conversation requests (non-fatal).
-  if (upstreamPath.startsWith('/backend-api/f/conversation')) {
-    const sentinelHeaders = await fetchSentinelTokens(page);
-    if (sentinelHeaders) {
-      Object.assign(headers, sentinelHeaders);
-    }
+  // Inject cached sentinel tokens for conversation requests (non-blocking, non-fatal).
+  if (upstreamPath.startsWith('/backend-api/f/conversation') && sentinelCache) {
+    Object.assign(headers, sentinelCache);
   }
-
 
   // Write SSE response headers immediately
   res.writeHead(200, {
@@ -610,6 +651,10 @@ async function main(): Promise<void> {
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('[sidecar] Shutting down...');
+  if (sentinelRefreshTimer) {
+    clearInterval(sentinelRefreshTimer);
+    sentinelRefreshTimer = null;
+  }
   if (browserContext) {
     await browserContext.close();
   }
@@ -618,6 +663,10 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
   console.log('[sidecar] Shutting down...');
+  if (sentinelRefreshTimer) {
+    clearInterval(sentinelRefreshTimer);
+    sentinelRefreshTimer = null;
+  }
   if (browserContext) {
     await browserContext.close();
   }

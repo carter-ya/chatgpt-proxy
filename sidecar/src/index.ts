@@ -54,6 +54,18 @@ interface StreamState {
   doneSent: boolean;
   currentEvent: string;
   deltaDecoder: DeltaV1Decoder | null;
+  imageIds: Set<string>;
+}
+
+interface StreamImage {
+  file_id: string;
+  file_name: string;
+  mime_type: string;
+  size_bytes: number;
+  width: number;
+  height: number;
+  download_url: string;
+  generation_id?: string;
 }
 
 const activeStreams = new Map<string, StreamState>();
@@ -310,6 +322,15 @@ function setHeader(headers: Record<string, string>, name: string, value: string)
     return;
   }
   headers[name] = value;
+}
+
+function deleteHeader(headers: Record<string, string>, name: string): void {
+  const normalized = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === normalized) {
+      delete headers[key];
+    }
+  }
 }
 
 async function getBrowserAuthorizationHeader(page: Page): Promise<string | null> {
@@ -773,40 +794,51 @@ async function checkLoginStatus(page: Page): Promise<boolean> {
   }
 
   const apiCheck: LoginApiCheck = await page.evaluate(async (authHeader) => {
-    try {
-      const resp = await fetch('/backend-api/me', {
-        credentials: 'include',
-        cache: 'no-store',
-        headers: { Authorization: authHeader },
-      });
-      const body = await resp.text();
-      let payload: any = {};
-      let parseError = '';
-      if (body) {
-        try {
-          payload = JSON.parse(body);
-        } catch (err: any) {
-          parseError = err.message || String(err);
+    const check = async (headers: Record<string, string>): Promise<LoginApiCheck> => {
+      try {
+        const resp = await fetch('/backend-api/me', {
+          credentials: 'include',
+          cache: 'no-store',
+          headers,
+        });
+        const body = await resp.text();
+        let payload: any = {};
+        let parseError = '';
+        if (body) {
+          try {
+            payload = JSON.parse(body);
+          } catch (err: any) {
+            parseError = err.message || String(err);
+          }
         }
+        const id = typeof payload?.id === 'string' ? payload.id : '';
+        return {
+          status: resp.status,
+          cfChallenge: resp.headers.get('cf-mitigated') === 'challenge',
+          authenticated: resp.status === 200 && id.length > 0 && !id.startsWith('ua-'),
+          id,
+          parseError,
+        };
+      } catch (err: any) {
+        return {
+          status: 0,
+          cfChallenge: false,
+          authenticated: false,
+          id: '',
+          error: err.message || String(err),
+        };
       }
+    };
 
-      const id = typeof payload?.id === 'string' ? payload.id : '';
-      return {
-        status: resp.status,
-        cfChallenge: resp.headers.get('cf-mitigated') === 'challenge',
-        authenticated: resp.status === 200 && id.length > 0 && !id.startsWith('ua-'),
-        id,
-        parseError,
-      };
-    } catch (err: any) {
-      return {
-        status: 0,
-        cfChallenge: false,
-        authenticated: false,
-        id: '',
-        error: err.message || String(err),
-      };
+    const withAuthorization = await check({ Authorization: authHeader });
+    // Cloudflare may challenge an API request carrying a synthetic Authorization
+    // header even though the normal browser session is healthy. Retry with the
+    // same cookie-only request used by the ChatGPT page before treating it as a
+    // login failure.
+    if (withAuthorization.cfChallenge) {
+      return check({});
     }
+    return withAuthorization;
   }, authorization);
   if (apiCheck.cfChallenge) {
     console.warn('[sidecar] /backend-api/me returned a Cloudflare challenge.');
@@ -1545,8 +1577,9 @@ function normalizeSSELine(state: StreamState, line: string): string {
   const data = trimmed.slice(5).trim();
   if (!data) return '';
   if (data === '[DONE]') {
-    state.doneSent = true;
-    return 'data: [DONE]\n\n';
+    // The browser callback owns finalization so it can recover a completed
+    // assistant message when the handoff stream contains metadata only.
+    return '';
   }
   if (state.currentEvent === 'error') {
     return `event: error\ndata: ${data}\n\n`;
@@ -1597,14 +1630,17 @@ function normalizeSSELine(state: StreamState, line: string): string {
     state.conversationId = nextConversationId;
   }
   const content = extractContentDelta(state, parsed);
+  const images = extractGeneratedImages(parsed).filter((item) => !state.imageIds.has(item.file_id));
+  images.forEach((item) => state.imageIds.add(item.file_id));
 
-  if (!conversationId && !content) {
+  if (!conversationId && !content && images.length === 0) {
     return '';
   }
 
-  const normalized: Record<string, string> = {};
+  const normalized: Record<string, unknown> = {};
   if (conversationId) normalized.conversation_id = conversationId;
   if (content) normalized.content = content;
+  if (images.length > 0) normalized.images = images;
 
   return `data: ${JSON.stringify(normalized)}\n\n`;
 }
@@ -1679,6 +1715,38 @@ function extractAbsoluteContent(parsed: any): string {
   }
 
   return '';
+}
+
+function extractGeneratedImages(parsed: any): StreamImage[] {
+  if (Array.isArray(parsed?.images)) {
+    return parsed.images.filter((item: any) =>
+      item && typeof item.file_id === 'string' && typeof item.download_url === 'string',
+    );
+  }
+  const message = parsed?.message || parsed;
+  if (message?.author?.role === 'user') return [];
+  const parts = message?.content?.parts;
+  if (!Array.isArray(parts)) return [];
+
+  const images: StreamImage[] = [];
+  for (const part of parts) {
+    if (!part || typeof part !== 'object' || part.content_type !== 'image_asset_pointer') continue;
+    if (!part?.metadata?.generation && !part?.metadata?.dalle) continue;
+    const pointer = typeof part.asset_pointer === 'string' ? part.asset_pointer : '';
+    const fileId = pointer.replace(/^(?:sediment|file-service):\/\//, '');
+    if (!fileId) continue;
+    images.push({
+      file_id: fileId,
+      file_name: `${fileId}.png`,
+      mime_type: typeof part.mime_type === 'string' ? part.mime_type : 'image/png',
+      size_bytes: Number(part.size_bytes || 0),
+      width: Number(part.width || 0),
+      height: Number(part.height || 0),
+      download_url: `/api/files/${encodeURIComponent(fileId)}/download`,
+      generation_id: typeof part?.metadata?.generation?.gen_id === 'string' ? part.metadata.generation.gen_id : (typeof part?.metadata?.dalle?.gen_id === 'string' ? part.metadata.dalle.gen_id : undefined),
+    });
+  }
+  return images;
 }
 
 function parseDeltaEncoding(data: string): string {
@@ -2035,8 +2103,14 @@ async function handleNonStreamProxy(
   body: string | undefined,
   res: Response,
 ): Promise<void> {
-  // Ignore caller-supplied auth and use the access token from this Chrome session.
-  await applyBrowserAuthHeaders(page, headers);
+  const isExternalUrl = /^https?:\/\//i.test(upstreamPath);
+  // ChatGPT requests use the current Chrome session. Signed storage URLs carry
+  // their own credentials and must not receive the ChatGPT bearer token.
+  if (isExternalUrl) {
+    deleteHeader(headers, 'authorization');
+  } else {
+    await applyBrowserAuthHeaders(page, headers);
+  }
 
   // Decode base64-encoded body from Go before passing to browser fetch()
   const decodedBody = body ? Buffer.from(body, 'base64').toString('utf-8') : undefined;
@@ -2083,15 +2157,29 @@ async function handleNonStreamProxy(
   // cookies, TLS fingerprint, and HTTP/2 settings — same pattern as handleStreamProxy
   // and checkLoginStatus (CSP bypass is already enabled via CDP).
   const result = await page.evaluate(
-    async ({ url, method: m, headers: hdrs, body: b }) => {
+    async ({ url, method: m, headers: hdrs, bodyBase64 }) => {
       try {
+        const bytesToBase64 = (bytes: Uint8Array): string => {
+          let binary = '';
+          const chunkSize = 0x8000;
+          for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+            const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+            binary += String.fromCharCode(...chunk);
+          }
+          return btoa(binary);
+        };
         const fetchOptions: RequestInit = {
           method: m || 'POST',
           headers: hdrs || {},
           credentials: 'include' as RequestCredentials,
         };
-        if (b !== undefined && b !== null && m !== 'GET' && m !== 'HEAD') {
-          fetchOptions.body = b;
+        if (bodyBase64 && m !== 'GET' && m !== 'HEAD') {
+          const binary = atob(bodyBase64);
+          const requestBytes = new Uint8Array(binary.length);
+          for (let index = 0; index < binary.length; index++) {
+            requestBytes[index] = binary.charCodeAt(index);
+          }
+          fetchOptions.body = requestBytes;
         }
         const resp = await fetch(url, fetchOptions);
 
@@ -2100,22 +2188,24 @@ async function handleNonStreamProxy(
           respHeaders[key] = value;
         });
 
-        const respBody = await resp.text();
         if (resp.headers.get('cf-mitigated') === 'challenge') {
+          const challengeBody = JSON.stringify({
+            error: 'Cloudflare challenge encountered. The sidecar opened the challenge URL in Chrome; complete it there and retry.',
+          });
           return {
             status: 403,
             headers: { ...respHeaders, 'content-type': 'application/json' },
-            body: JSON.stringify({
-              error: 'Cloudflare challenge encountered. The sidecar opened the challenge URL in Chrome; complete it there and retry.',
-            }),
+            body: bytesToBase64(new TextEncoder().encode(challengeBody)),
             cfChallenge: true,
           };
         }
 
+        const respBody = new Uint8Array(await resp.arrayBuffer());
+
         return {
           status: resp.status,
           headers: respHeaders,
-          body: respBody,
+          body: bytesToBase64(respBody),
           cfChallenge: false,
         };
       } catch (err: any) {
@@ -2129,7 +2219,7 @@ async function handleNonStreamProxy(
         };
       }
     },
-    { url: targetUrl, method, headers, body: decodedBody },
+    { url: targetUrl, method, headers, bodyBase64: body },
   );
 
   if (result.cfChallenge) {
@@ -2140,11 +2230,6 @@ async function handleNonStreamProxy(
   }
   if (result.status === 401) {
     clearBrowserAuthCache();
-  }
-
-  // Re-encode response body as base64 for Go side
-  if (result.body) {
-    result.body = Buffer.from(result.body).toString('base64');
   }
 
   const { cfChallenge: _cfChallenge, ...responsePayload } = result;
@@ -2222,6 +2307,7 @@ async function handleStreamProxy(
     doneSent: false,
     currentEvent: 'message',
     deltaDecoder: null,
+    imageIds: new Set<string>(),
   });
 
   // Clean up on client disconnect
@@ -2233,7 +2319,7 @@ async function handleStreamProxy(
   // __sidecarStreamChunk for each chunk.
   page
     .evaluate(
-      async ({ method, path: p, headers: hdrs, body: b, streamId: sid }) => {
+      async ({ method, path: p, headers: hdrs, body: b, streamId: sid, imageMode }) => {
         const win = window as any;
         try {
           const url = p;
@@ -2406,6 +2492,86 @@ async function handleStreamProxy(
               }
               const resumeRemaining = resumeDecoder.decode();
               if (resumeRemaining) await win.__sidecarStreamChunk(sid, resumeRemaining, false);
+
+              // The handoff stream can contain only control metadata for image
+              // generation. Read the finalized conversation in the same page
+              // context and emit a normalized final snapshot.
+              for (let attempt = 0; attempt < 20; attempt++) {
+                const authEntry = Object.entries(hdrs || {}).find(
+                  ([key]) => key.toLowerCase() === 'authorization',
+                );
+                const detailHeaders: Record<string, string> = {};
+                if (authEntry) detailHeaders.Authorization = authEntry[1];
+                if (imageMode) {
+                  const asyncResp = await fetch(
+                    `/backend-api/conversation/${encodeURIComponent(handoff.conversationId)}/async-status`,
+                    {
+                      method: 'POST',
+                      headers: detailHeaders,
+                      body: '{}',
+                      credentials: 'include' as RequestCredentials,
+                    },
+                  );
+                }
+                const detailResp = await fetch(
+                  `/backend-api/conversation/${encodeURIComponent(handoff.conversationId)}`,
+                  {
+                    method: 'GET',
+                    headers: detailHeaders,
+                    credentials: 'include' as RequestCredentials,
+                    cache: 'no-store' as RequestCache,
+                  },
+                );
+                if (detailResp.ok) {
+                  const conversation = await detailResp.json();
+                  const messages: any[] = Object.values(conversation?.mapping || {})
+                    .map((node: any) => node?.message)
+                    .filter(Boolean);
+                  const textMessages = messages
+                    .filter((message: any) =>
+                      message?.author?.role === 'assistant' &&
+                      message?.content?.content_type === 'text' &&
+                      message?.metadata?.is_thinking_preamble_message !== true,
+                    )
+                    .sort((left: any, right: any) =>
+                      Number(left?.create_time || 0) - Number(right?.create_time || 0),
+                    );
+                  const latestText = textMessages.at(-1)?.content?.parts;
+                  const content = Array.isArray(latestText)
+                    ? latestText.filter((part: unknown) => typeof part === 'string').join('\n')
+                    : '';
+                  const imageById = new Map<string, StreamImage>();
+                  for (const message of messages) {
+                    if (message?.author?.role === 'user' || !Array.isArray(message?.content?.parts)) continue;
+                    for (const part of message.content.parts) {
+                      if (part?.content_type !== 'image_asset_pointer') continue;
+                      if (!part?.metadata?.generation && !part?.metadata?.dalle) continue;
+                      const pointer = typeof part.asset_pointer === 'string' ? part.asset_pointer : '';
+                      const fileId = pointer.replace(/^(?:sediment|file-service):\/\//, '');
+                      if (!fileId || imageById.has(fileId)) continue;
+                      imageById.set(fileId, {
+                        file_id: fileId,
+                        file_name: `${fileId}.png`,
+                        mime_type: typeof part.mime_type === 'string' ? part.mime_type : 'image/png',
+                        size_bytes: Number(part.size_bytes || 0),
+                        width: Number(part.width || 0),
+                        height: Number(part.height || 0),
+                        download_url: `/api/files/${encodeURIComponent(fileId)}/download`,
+                      });
+                    }
+                  }
+                  const images = Array.from(imageById.values());
+                  if (content || images.length > 0) {
+                    await win.__sidecarStreamChunk(
+                      sid,
+                      `event: sidecar_final\ndata: ${JSON.stringify({ content, images })}\n\n`,
+                      false,
+                    );
+                    break;
+                  }
+                }
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+              }
             } else if (initialText) {
               await win.__sidecarStreamChunk(sid, initialText, false);
             }
@@ -2424,7 +2590,14 @@ async function handleStreamProxy(
           return { status: 0, cfChallenge: false, error: message };
         }
       },
-      { method, path: upstreamPath, headers, body: decodedBody, streamId },
+      {
+        method,
+        path: upstreamPath,
+        headers,
+        body: decodedBody,
+        streamId,
+        imageMode: decodedBody?.includes('"picture_v2"') ?? false,
+      },
     )
     .then((result) => {
       if (result?.cfChallenge) {
@@ -2455,7 +2628,8 @@ function startServer(): void {
 
   // Parse JSON bodies — the outer envelope is JSON; the inner "body" field
   // is a pre-serialized string that we pass through untouched.
-  app.use(express.json({ limit: '10mb' }));
+  // Base64 adds roughly 33% overhead to the 50 MB upload limit.
+  app.use(express.json({ limit: '70mb' }));
 
   // ---- GET /health ----
   app.get('/health', (_req: Request, res: Response) => {

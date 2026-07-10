@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate, useOutletContext } from 'react-router-dom';
 import { chat } from '../api/client';
+import type { FileAsset, UploadedFile } from '../api/client';
 import { useChat } from '../hooks/useChat';
 import MessageList from '../components/MessageList';
 import ChatInput from '../components/ChatInput';
@@ -9,7 +10,8 @@ interface LocalMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
-  images?: string[];
+  images?: FileAsset[];
+  attachments?: FileAsset[];
   streaming?: boolean;
 }
 
@@ -39,6 +41,7 @@ export default function ChatPage() {
         role: m.role,
         content: m.content,
         images: m.images,
+        attachments: m.attachments,
       }));
       setMessages(msgs);
     } catch {
@@ -60,7 +63,7 @@ export default function ChatPage() {
   }, [conversationId, loadMessages]);
 
   const handleSend = useCallback(
-    async (text: string, model: string, genId?: string, attachmentFileId?: string) => {
+    async (text: string, model: string, genId?: string, attachment?: UploadedFile) => {
       const userMsg: LocalMessage = {
         id: `user-${Date.now()}`,
         role: 'user',
@@ -83,7 +86,7 @@ export default function ChatPage() {
         model,
         conversationId: conversationId || undefined,
         genId: genId || undefined,
-        attachmentFileId: attachmentFileId || undefined,
+        attachment,
         onConversationCreated: (newConvId) => {
           if (!conversationId) {
             pendingConversationIdRef.current = newConvId;
@@ -96,6 +99,16 @@ export default function ChatPage() {
                 ? { ...m, content: fullContent }
                 : m,
             ),
+          );
+        },
+        onImages: (images) => {
+          setMessages((prev) =>
+            prev.map((m) => {
+              if (m.id !== streamMsgIdRef.current) return m;
+              const existing = new Map((m.images || []).map((image) => [image.file_id, image]));
+              images.forEach((image) => existing.set(image.file_id, image));
+              return { ...m, images: Array.from(existing.values()) };
+            }),
           );
         },
         onDone: () => {

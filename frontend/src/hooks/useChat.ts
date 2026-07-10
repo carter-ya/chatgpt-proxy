@@ -1,14 +1,15 @@
 import { useState, useCallback, useRef } from 'react';
-import { chat } from '../api/client';
+import { chat, type FileAsset, type UploadedFile } from '../api/client';
 
 interface SendMessageParams {
   message: string;
   model: string;
   conversationId?: string;
   genId?: string;
-  attachmentFileId?: string;
+  attachment?: UploadedFile;
   onConversationCreated?: (id: string) => void;
   onToken?: (token: string) => void;
+  onImages?: (images: FileAsset[]) => void;
   onDone?: (fullMessage: string) => void;
   onError?: (error: Error) => void;
 }
@@ -41,7 +42,7 @@ export function useChat(): UseChatReturn {
         params.conversationId,
         true,
         params.genId,
-        params.attachmentFileId,
+        params.attachment,
         controller.signal,
       );
 
@@ -97,7 +98,7 @@ export function useChat(): UseChatReturn {
           }
           if (data === '[DONE]') continue;
 
-          let parsed: { conversation_id?: string; content?: string; error?: string };
+          let parsed: { conversation_id?: string; content?: string; images?: FileAsset[]; error?: string };
           try {
             parsed = JSON.parse(data);
           } catch {
@@ -117,6 +118,9 @@ export function useChat(): UseChatReturn {
             fullContent += parsed.content;
             params.onToken?.(fullContent);
           }
+          if (parsed.images?.length) {
+            params.onImages?.(parsed.images);
+          }
         }
       }
 
@@ -126,7 +130,7 @@ export function useChat(): UseChatReturn {
       if (remaining.startsWith('data: ')) {
         const data = remaining.slice(6).trim();
         if (data !== '[DONE]') {
-          let parsed: { content?: string; error?: string } | null = null;
+          let parsed: { content?: string; images?: FileAsset[]; error?: string } | null = null;
           try {
             parsed = JSON.parse(data);
           } catch {
@@ -138,6 +142,9 @@ export function useChat(): UseChatReturn {
           if (parsed?.content) {
             fullContent += parsed.content;
             params.onToken?.(fullContent);
+          }
+          if (parsed?.images?.length) {
+            params.onImages?.(parsed.images);
           }
         }
       }

@@ -22,6 +22,9 @@ XIAOMING_CHROME_LAUNCH_MODE=cdp
 XIAOMING_CHROME_CDP_PORT=9222
 ```
 
+如果本机 `5432` 已被占用，可设置 `XIAOMING_POSTGRES_PORT=5433`，并把
+`XIAOMING_DATABASE_URL` 中的端口同步改为 `5433`。
+
 生成 32 字节 base64 加密密钥：
 
 ```sh
@@ -29,6 +32,8 @@ openssl rand -base64 32
 ```
 
 `XIAOMING_SESSION_TOKENS` 是已废弃的旧 token-pool 配置；当前默认链路只使用 sidecar Chrome 登录态，不读取本地 token 池。
+
+项目的 `/images` 页面对应 ChatGPT 独立 Images 工作区，使用 `picture_v2` 图片模式和异步状态轮询，不等同于普通聊天中输入“生成图片”。
 
 ### 2. 启动服务
 

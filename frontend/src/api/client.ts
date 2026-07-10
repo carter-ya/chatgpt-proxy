@@ -55,8 +55,23 @@ export interface Conversation {
 export interface Message {
   role: 'user' | 'assistant';
   content: string;
-  images?: string[];
+  images?: FileAsset[];
+  attachments?: FileAsset[];
 }
+
+export interface FileAsset {
+  file_id: string;
+  file_name: string;
+  mime_type: string;
+  size_bytes: number;
+  width: number;
+  height: number;
+  url?: string;
+  download_url: string;
+  generation_id?: string;
+}
+
+export type UploadedFile = FileAsset;
 
 export const auth = {
   register: (email: string, password: string) =>
@@ -72,7 +87,7 @@ export const chat = {
     conversationId?: string,
     stream = true,
     genId?: string,
-    attachmentFileId?: string,
+    attachment?: UploadedFile,
     signal?: AbortSignal,
   ) => {
     return fetch(`${API_BASE}/conversation`, {
@@ -85,16 +100,58 @@ export const chat = {
         conversation_id: conversationId,
         stream,
         gen_id: genId,
-        attachment_file_id: attachmentFileId,
+        attachment_file_id: attachment?.file_id,
+        attachment,
       }),
     });
   },
 
-  uploadFile: async (file: File): Promise<{ file_id: string; url: string }> => {
+  generateImage: (
+    prompt: string,
+    model = 'gpt-5-6-thinking',
+    signal?: AbortSignal,
+    attachment?: UploadedFile,
+    conversationId?: string,
+  ) => {
+    return fetch(`${API_BASE}/images/generations`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      signal,
+      body: JSON.stringify({ prompt, model, attachment, conversation_id: conversationId, original_gen_id: attachment?.generation_id, original_file_id: attachment?.file_id }),
+    });
+  },
+
+  selectImage: async () => {
+    const response = await fetch(`${API_BASE}/images/select`, { method: 'POST', headers: getAuthHeaders(), body: '{}' });
+    if (!response.ok) throw new Error(`候选图片反馈失败: HTTP ${response.status}`);
+  },
+
+  uploadFile: async (file: File): Promise<UploadedFile> => {
     const formData = new FormData();
     formData.append('file', file);
-    const res = await apiClient.post<{ file_id: string; url: string }>('/files', formData);
+    const res = await apiClient.post<UploadedFile>('/files', formData);
     return res.data;
+  },
+
+  getFileBlob: async (file: Pick<FileAsset, 'download_url'>): Promise<Blob> => {
+    const token = localStorage.getItem('token');
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch(file.download_url, { headers });
+    if (!response.ok) {
+      throw new Error(`文件下载失败: HTTP ${response.status}`);
+    }
+    return response.blob();
+  },
+
+  downloadFile: async (file: Pick<FileAsset, 'download_url' | 'file_name'>) => {
+    const blob = await chat.getFileBlob(file);
+    const objectURL = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectURL;
+    link.download = file.file_name;
+    link.click();
+    URL.revokeObjectURL(objectURL);
   },
 
   listConversations: () =>

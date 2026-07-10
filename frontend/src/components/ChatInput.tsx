@@ -1,8 +1,8 @@
 import { useState, useRef, useCallback, type KeyboardEvent, type ChangeEvent } from 'react';
-import { chat } from '../api/client';
+import { chat, type UploadedFile } from '../api/client';
 
 interface ChatInputProps {
-  onSend: (text: string, model: string, genId?: string, attachmentFileId?: string) => void;
+  onSend: (text: string, model: string, genId?: string, attachment?: UploadedFile) => void;
   sending: boolean;
   onCancel: () => void;
 }
@@ -11,7 +11,7 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
   const [text, setText] = useState('');
   const [uploading, setUploading] = useState(false);
   const [genId] = useState<string | undefined>(undefined);
-  const [attachmentFileId, setAttachmentFileId] = useState<string | undefined>(undefined);
+  const [attachment, setAttachment] = useState<UploadedFile | undefined>(undefined);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -26,13 +26,13 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
   const handleSend = useCallback(() => {
     const trimmed = text.trim();
     if (!trimmed || sending) return;
-    onSend(trimmed, 'gpt-5-6-thinking', genId, attachmentFileId);
+    onSend(trimmed, 'gpt-5-6-thinking', genId, attachment);
     setText('');
-    setAttachmentFileId(undefined);
+    setAttachment(undefined);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [text, sending, genId, attachmentFileId, onSend]);
+  }, [text, sending, genId, attachment, onSend]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -53,32 +53,34 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
       return;
     }
 
-    if (!file.type.startsWith('image/')) {
-      alert('仅支持图片文件');
-      return;
-    }
-
     setUploading(true);
     try {
       const result = await chat.uploadFile(file);
-      setAttachmentFileId(result.file_id);
+      setAttachment(result);
     } catch {
-      alert('图片上传失败');
+      alert('文件上传失败');
     } finally {
       setUploading(false);
     }
   }, []);
 
+  const handleDownloadAttachment = useCallback(() => {
+    if (attachment) void chat.downloadFile(attachment);
+  }, [attachment]);
+
   return (
     <>
-      {attachmentFileId && (
+      {attachment && (
         <div className="file-preview">
           <span className="file-preview-item">
-            📎 已附加图片
+            📎 {attachment.file_name}
+            <button type="button" className="download-file" onClick={handleDownloadAttachment}>
+              下载
+            </button>
             <button
               className="remove-file"
-              onClick={() => setAttachmentFileId(undefined)}
-              aria-label="移除图片"
+              onClick={() => setAttachment(undefined)}
+              aria-label="移除文件"
             >
               ×
             </button>
@@ -112,7 +114,7 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
               className="upload-btn"
               onClick={() => fileInputRef.current?.click()}
               disabled={uploading}
-              aria-label="上传图片"
+              aria-label="上传文件"
             >
               {uploading ? <span className="spinner" /> : '📎'}
             </button>
@@ -131,7 +133,7 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.html"
             style={{ display: 'none' }}
             onChange={handleFileUpload}
           />

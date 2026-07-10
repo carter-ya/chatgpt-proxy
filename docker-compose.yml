@@ -19,7 +19,7 @@ services:
   postgres:
     image: postgres:16-alpine
     ports:
-      - "5432:5432"
+      - "${XIAOMING_POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_USER: chatgpt_proxy
       POSTGRES_PASSWORD: dev_secret

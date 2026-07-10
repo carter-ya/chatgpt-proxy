@@ -1,13 +1,17 @@
+import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { dracula } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Components } from 'react-markdown';
 import { extractImages } from '../utils/format';
+import { chat, type FileAsset } from '../api/client';
 
 interface ChatMessageProps {
   role: 'user' | 'assistant';
   content: string;
+  images?: FileAsset[];
+  attachments?: FileAsset[];
   streaming?: boolean;
 }
 
@@ -37,8 +41,43 @@ const components: Components = {
   },
 };
 
-export default function ChatMessage({ role, content, streaming }: ChatMessageProps) {
-  const images = role === 'assistant' ? extractImages(content) : [];
+function AuthenticatedImage({ image }: { image: FileAsset }) {
+  const [src, setSrc] = useState('');
+
+  useEffect(() => {
+    let objectURL = '';
+    let cancelled = false;
+    chat.getFileBlob(image)
+      .then((blob) => {
+        if (cancelled) return;
+        objectURL = URL.createObjectURL(blob);
+        setSrc(objectURL);
+      })
+      .catch(() => setSrc(''));
+    return () => {
+      cancelled = true;
+      if (objectURL) URL.revokeObjectURL(objectURL);
+    };
+  }, [image]);
+
+  return (
+    <div className="message-image-container">
+      {src && <img src={src} alt={image.file_name} className="message-image" />}
+      <button type="button" onClick={() => void chat.downloadFile(image)}>
+        下载图片
+      </button>
+    </div>
+  );
+}
+
+export default function ChatMessage({
+  role,
+  content,
+  images = [],
+  attachments = [],
+  streaming,
+}: ChatMessageProps) {
+  const publicImages = role === 'assistant' ? extractImages(content) : [];
 
   return (
     <div className={`chat-message ${role}`}>
@@ -60,8 +99,8 @@ export default function ChatMessage({ role, content, streaming }: ChatMessagePro
           <div>{content}</div>
         )}
 
-        {images.length > 0 &&
-          images.map((url, i) => (
+        {publicImages.length > 0 &&
+          publicImages.map((url, i) => (
             <img
               key={i}
               src={url}
@@ -69,6 +108,21 @@ export default function ChatMessage({ role, content, streaming }: ChatMessagePro
               className="message-image"
             />
           ))}
+
+        {images.map((image) => (
+          <AuthenticatedImage key={image.file_id} image={image} />
+        ))}
+
+        {attachments.map((attachment) => (
+          <button
+            key={attachment.file_id}
+            type="button"
+            className="message-attachment"
+            onClick={() => void chat.downloadFile(attachment)}
+          >
+            下载 {attachment.file_name}
+          </button>
+        ))}
 
         {streaming && <span className="streaming-cursor" />}
       </div>

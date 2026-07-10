@@ -62,8 +62,9 @@ func (c *BrowserProxyClient) BuildRequest(ctx context.Context, method, path, tok
 		}
 	}
 
-	// 通过检测 JSON body 判断是否为流式请求。
-	isStream := isStreamingRequest(bodyBytes)
+	// ChatGPT's current /f/conversation endpoint always returns SSE even though
+	// the web request body no longer carries a `stream` field.
+	isStream := path == "/backend-api/f/conversation" || isStreamingRequest(bodyBytes)
 
 	// 构建 Sidecar 代理请求 JSON。
 	sidecarReq := SidecarProxyRequest{
@@ -73,6 +74,9 @@ func (c *BrowserProxyClient) BuildRequest(ctx context.Context, method, path, tok
 			"Content-Type": contentType,
 		},
 		Body: base64.StdEncoding.EncodeToString(bodyBytes),
+	}
+	if method == http.MethodPut && (strings.HasPrefix(path, "https://") || strings.HasPrefix(path, "http://")) {
+		sidecarReq.Headers["x-ms-blob-type"] = "BlockBlob"
 	}
 	_ = tokenValue // Browser-profile mode authenticates with Chrome cookies/OAuth state, never env tokens.
 

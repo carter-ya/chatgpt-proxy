@@ -1,10 +1,13 @@
 import { useEffect, useRef } from 'react';
 import ChatMessage from './ChatMessage';
+import type { FileAsset } from '../api/client';
 
 interface LocalMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  images?: FileAsset[];
+  attachments?: FileAsset[];
   streaming?: boolean;
 }
 
@@ -44,6 +47,8 @@ export default function MessageList({ messages }: MessageListProps) {
             key={msg.id}
             role={msg.role}
             content={msg.content}
+            images={msg.images}
+            attachments={msg.attachments}
             streaming={msg.streaming}
           />
         ))}

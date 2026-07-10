@@ -1,6 +1,7 @@
 import type { Conversation } from '../api/client';
 import { formatTime, getAvatarLetter } from '../utils/format';
 import { useAuth } from '../contexts/AuthContext';
+import { useNavigate } from 'react-router-dom';
 
 interface ConversationListProps {
   conversations: Conversation[];
@@ -20,12 +21,16 @@ export default function ConversationList({
   onNewChat,
 }: ConversationListProps) {
   const { user, logout } = useAuth();
+  const navigate = useNavigate();
 
   return (
     <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
       <div className="sidebar-header">
         <button className="new-chat-btn" onClick={onNewChat}>
           + 新对话
+        </button>
+        <button className="images-btn" onClick={() => navigate('/images')}>
+          图片
         </button>
       </div>
 

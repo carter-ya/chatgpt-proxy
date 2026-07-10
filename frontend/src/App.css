@@ -191,6 +191,17 @@ input, textarea {
   transition: background 0.2s;
 }
 
+.images-btn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 12px;
+  border: 1px solid #565869;
+  border-radius: 6px;
+  background: transparent;
+  color: #c5c5d2;
+  cursor: pointer;
+}
+
 .new-chat-btn:hover {
   background: #2b2c2f;
 }
@@ -290,6 +301,68 @@ input, textarea {
   flex-direction: column;
   min-width: 0;
   background: #343541;
+}
+
+.images-workspace {
+  width: min(960px, 100%);
+  margin: 0 auto;
+  padding: 40px 24px;
+}
+
+.images-workspace h1 {
+  margin: 0 0 24px;
+  font-size: 28px;
+}
+
+.image-prompt-row {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.image-prompt-row textarea {
+  flex: 1;
+  min-height: 76px;
+  resize: vertical;
+  border: 1px solid #565869;
+  border-radius: 8px;
+  padding: 12px;
+  background: #202123;
+  color: #ececf1;
+}
+
+.image-prompt-row button {
+  align-self: flex-end;
+  border: 0;
+  border-radius: 6px;
+  padding: 10px 16px;
+  background: #10a37f;
+  color: white;
+  cursor: pointer;
+}
+
+.image-prompt-row button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.image-reference-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.generated-image-option > button { padding: 8px 12px; border: 1px solid var(--border-color); border-radius: 6px; background: var(--surface-color); cursor: pointer; }
+.image-reference-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px solid var(--border-color); border-radius: 6px; }
+.image-reference-chip button { border: 0; background: transparent; cursor: pointer; font-size: 18px; }
+.image-choice-hint { margin: 18px 0 8px; font-weight: 600; }
+.generated-image-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.generated-image-option { border: 2px solid transparent; border-radius: 8px; padding: 4px; cursor: pointer; }
+.generated-image-option.selected { border-color: var(--primary-color); }
+
+.image-status,
+.image-error {
+  margin-top: 16px;
+  color: #8e8ea0;
+}
+
+.image-error {
+  color: #e57373;
 }
 
 /* Chat Page */
@@ -472,7 +545,31 @@ input, textarea {
 /* Image in messages */
 .message-image {
   max-width: 400px;
-  border-radius: 10px;
+  border-radius: 8px;
+  margin-top: 8px;
+}
+
+.message-image-container {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.message-image-container button,
+.message-attachment,
+.download-file {
+  border: 1px solid #565869;
+  background: transparent;
+  color: #c5c5d2;
+  border-radius: 6px;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.message-attachment {
+  display: block;
   margin-top: 8px;
 }
 

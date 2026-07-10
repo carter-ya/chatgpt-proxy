@@ -91,3 +91,21 @@ func TestBrowserProxyClientBuildRequestOmitsAuthorization(t *testing.T) {
 		t.Fatalf("StatusCode = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 }
+
+func TestBrowserProxyClientConversationUsesStreamEndpointWithoutStreamField(t *testing.T) {
+	client := NewBrowserProxyClient("http://127.0.0.1:3100", "https://chatgpt.com")
+	req, err := client.BuildRequest(
+		context.Background(),
+		http.MethodPost,
+		"/backend-api/f/conversation",
+		"",
+		strings.NewReader(`{"action":"next"}`),
+		"application/json",
+	)
+	if err != nil {
+		t.Fatalf("BuildRequest() error = %v", err)
+	}
+	if got := req.URL.Query().Get("stream"); got != "true" {
+		t.Fatalf("stream query = %q, want true", got)
+	}
+}

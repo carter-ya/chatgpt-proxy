@@ -351,9 +351,6 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 			"web_push_notification_permission": "default",
 		},
 	}
-	if reqBody.ConversationID != "" {
-		upstreamBody["conversation_id"] = reqBody.ConversationID
-	}
 	if model == "gpt-5-6-thinking" {
 		upstreamBody["thinking_effort"] = thinkingEffort
 	}

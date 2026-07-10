@@ -26,7 +26,7 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
   const handleSend = useCallback(() => {
     const trimmed = text.trim();
     if (!trimmed || sending) return;
-    onSend(trimmed, 'gpt-4o', genId, attachmentFileId);
+    onSend(trimmed, 'gpt-5-6-thinking', genId, attachmentFileId);
     setText('');
     setAttachmentFileId(undefined);
     if (textareaRef.current) {
@@ -48,8 +48,8 @@ export default function ChatInput({ onSend, sending, onCancel }: ChatInputProps)
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 10 * 1024 * 1024) {
-      alert('文件大小不能超过 10MB');
+    if (file.size > 50 * 1024 * 1024) {
+      alert('文件大小不能超过 50MB');
       return;
     }
 

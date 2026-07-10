@@ -6,16 +6,21 @@ import { fileURLToPath } from 'url';
 
 function resolveServerPort(): number {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
-  // 1. 优先从 backend/.port-server 文件读取后端实际监听端口
-  try {
-    const portFile = path.resolve(__dirname, '../backend/.port-server');
-    const raw = fs.readFileSync(portFile, 'utf-8').trim();
-    const port = parseInt(raw, 10);
-    if (!isNaN(port) && port > 0 && port <= 65535) {
-      return port;
+  // 1. 优先从项目根目录 .port-server 文件读取后端实际监听端口。
+  const portFiles = [
+    path.resolve(__dirname, '../.port-server'),
+    path.resolve(__dirname, '../backend/.port-server'),
+  ];
+  for (const portFile of portFiles) {
+    try {
+      const raw = fs.readFileSync(portFile, 'utf-8').trim();
+      const port = parseInt(raw, 10);
+      if (!isNaN(port) && port > 0 && port <= 65535) {
+        return port;
+      }
+    } catch {
+      // 文件不存在或无法读取，继续尝试后续来源。
     }
-  } catch {
-    // 文件不存在或无法读取，使用后续降级来源
   }
   // 2. 降级到环境变量 XIAOMING_SERVER_PORT
   if (process.env.XIAOMING_SERVER_PORT) {

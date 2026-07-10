@@ -71,10 +71,6 @@ func Load() (*Config, error) {
 	v.BindEnv("sidecar_port")
 	v.BindEnv("token_check_interval")
 
-	// 调试：在 Unmarshal 前确认关键环境变量已通过 godotenv 注入。
-	log.Printf("[config] Unmarshal 前 XIAOMING_SESSION_TOKENS len=%d (os.Getenv)", len(os.Getenv("XIAOMING_SESSION_TOKENS")))
-	log.Printf("[config] Unmarshal 前 XIAOMING_DATABASE_URL len=%d", len(os.Getenv("XIAOMING_DATABASE_URL")))
-
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("config: unmarshal 失败: %w", err)
@@ -99,7 +95,6 @@ func Load() (*Config, error) {
 			}
 		}
 		cfg.SessionTokens = tokens
-		log.Printf("[config] 手动回填 session_tokens: 共 %d 个 token", len(tokens))
 	}
 
 	validate := validator.New()
@@ -107,7 +102,7 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: 校验失败: %w", err)
 	}
 
-		// 显式检查必需配置项的空值。
+	// 显式检查必需配置项的空值。
 	// validator 的 required tag 对 string 类型的零值（空字符串）有效，
 	// 但 DatabaseURL 没有 required tag，且使用 default:"" 仅为语义占位。
 	// 显式检查确保缺失关键配置时输出清晰的错误信息。
@@ -123,10 +118,14 @@ func Load() (*Config, error) {
 
 // loadEnvFile 尝试从项目根目录加载 .env 文件。
 // 使用 godotenv.Load 在变量未设置时注入，已存在的环境变量不会被覆盖。
-// .env 文件路径固定为 ../.env（相对于 backend/ 工作目录）。
 func loadEnvFile() {
-	// 定位项目根目录的 .env 文件
-	envPath := filepath.Join("..", ".env")
+	root, err := findProjectRoot()
+	if err != nil {
+		log.Printf("未能定位项目根目录，跳过自动加载 .env: %v", err)
+		return
+	}
+
+	envPath := filepath.Join(root, ".env")
 	if _, err := os.Stat(envPath); err == nil {
 		if err := godotenv.Load(envPath); err != nil {
 			log.Printf("警告: 无法加载 .env 文件 (%s): %v", envPath, err)
@@ -135,5 +134,24 @@ func loadEnvFile() {
 		log.Printf("[config] .env 文件加载成功 (%s)", envPath)
 	} else {
 		log.Printf("未找到 .env 文件 (%s)，跳过自动加载", envPath)
+	}
+}
+
+func findProjectRoot() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("go.mod not found from %s upward", dir)
+		}
+		dir = parent
 	}
 }

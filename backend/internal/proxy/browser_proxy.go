@@ -24,14 +24,15 @@ type SidecarProxyResponse struct {
 	Status  int               `json:"status"`
 	Headers map[string]string `json:"headers"`
 	Body    string            `json:"body"` // base64 编码
+	Error   string            `json:"error,omitempty"`
 }
 
 // BrowserProxyClient 实现 ProxyClient 接口，将代理请求委托给 Playwright Sidecar。
 // sentinel token 获取已迁移至 Sidecar Chrome 端，Go 端不再管理 sentinelCache。
 type BrowserProxyClient struct {
-	sidecarURL    string
-	httpClient    *http.Client
-	baseURL       string
+	sidecarURL string
+	httpClient *http.Client
+	baseURL    string
 }
 
 // NewBrowserProxyClient 创建一个新的 BrowserProxyClient。
@@ -69,11 +70,11 @@ func (c *BrowserProxyClient) BuildRequest(ctx context.Context, method, path, tok
 		Method: method,
 		Path:   path,
 		Headers: map[string]string{
-			"Authorization": "Bearer " + tokenValue,
-			"Content-Type":  contentType,
+			"Content-Type": contentType,
 		},
 		Body: base64.StdEncoding.EncodeToString(bodyBytes),
 	}
+	_ = tokenValue // Browser-profile mode authenticates with Chrome cookies/OAuth state, never env tokens.
 
 	// sentinel token 获取已迁移至 Sidecar，由 Sidecar 通过 Chrome 自动注入。
 	// Sidecar 在代理 /backend-api/f/conversation 请求时会自动获取 sentinel。
@@ -114,17 +115,47 @@ func (c *BrowserProxyClient) Do(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 
-	// 非流式响应：解析 Sidecar JSON 响应，构建 *http.Response。
-	defer resp.Body.Close()
-
 	sidecarRespBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("读取 Sidecar 响应失败: %w", err)
 	}
+	resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		return &http.Response{
+			Status:     resp.Status,
+			StatusCode: resp.StatusCode,
+			Proto:      resp.Proto,
+			ProtoMajor: resp.ProtoMajor,
+			ProtoMinor: resp.ProtoMinor,
+			Header:     resp.Header.Clone(),
+			Body:       io.NopCloser(bytes.NewReader(sidecarRespBytes)),
+			Request:    req,
+		}, nil
+	}
+
+	// 非流式响应：解析 Sidecar JSON 响应，构建 *http.Response。
 	var sidecarResp SidecarProxyResponse
 	if err := json.Unmarshal(sidecarRespBytes, &sidecarResp); err != nil {
 		return nil, fmt.Errorf("解析 Sidecar 响应失败: %w", err)
+	}
+	if sidecarResp.Status == 0 {
+		if sidecarResp.Error == "" {
+			sidecarResp.Error = "Sidecar browser request failed"
+		}
+		body := []byte(fmt.Sprintf(`{"error":%q}`, sidecarResp.Error))
+		headers := make(http.Header)
+		headers.Set("Content-Type", "application/json")
+		return &http.Response{
+			Status:     http.StatusText(http.StatusBadGateway),
+			StatusCode: http.StatusBadGateway,
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     headers,
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Request:    req,
+		}, nil
 	}
 
 	// 解码响应 body。

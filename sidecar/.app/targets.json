@@ -1,0 +1,15 @@
+{
+  "namespace": "sidecar",
+  "targets": {
+    "browser-proxy": {
+      "workdir": ".",
+      "build": "npm run build",
+      "start": "npm run dev",
+      "test": "npm run build",
+      "health": "http://localhost:{port:http}/health",
+      "ports": {
+        "http": { "port": 3100, "host": "127.0.0.1" }
+      }
+    }
+  }
+}

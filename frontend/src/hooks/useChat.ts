@@ -42,6 +42,7 @@ export function useChat(): UseChatReturn {
         true,
         params.genId,
         params.attachmentFileId,
+        controller.signal,
       );
 
       if (controller.signal.aborted) return;
@@ -62,6 +63,7 @@ export function useChat(): UseChatReturn {
       const decoder = new TextDecoder();
       let fullContent = '';
       let buffer = '';
+      let eventType = 'message';
 
       while (true) {
         if (controller.signal.aborted) {
@@ -79,24 +81,41 @@ export function useChat(): UseChatReturn {
 
         for (const line of lines) {
           const trimmed = line.trim();
+          if (!trimmed) {
+            eventType = 'message';
+            continue;
+          }
+          if (trimmed.startsWith('event:')) {
+            eventType = trimmed.slice(6).trim() || 'message';
+            continue;
+          }
           if (!trimmed.startsWith('data: ')) continue;
 
           const data = trimmed.slice(6).trim();
+          if (eventType === 'error') {
+            throw new Error(data || '流式响应失败');
+          }
           if (data === '[DONE]') continue;
 
+          let parsed: { conversation_id?: string; content?: string; error?: string };
           try {
-            const parsed = JSON.parse(data);
-
-            if (parsed.conversation_id && !params.conversationId) {
-              params.onConversationCreated?.(parsed.conversation_id);
-            }
-
-            if (parsed.content) {
-              fullContent += parsed.content;
-              params.onToken?.(fullContent);
-            }
+            parsed = JSON.parse(data);
           } catch {
             // skip unparseable chunks
+            continue;
+          }
+
+          if (parsed.error) {
+            throw new Error(parsed.error);
+          }
+
+          if (parsed.conversation_id && !params.conversationId) {
+            params.onConversationCreated?.(parsed.conversation_id);
+          }
+
+          if (parsed.content) {
+            fullContent += parsed.content;
+            params.onToken?.(fullContent);
           }
         }
       }
@@ -107,14 +126,18 @@ export function useChat(): UseChatReturn {
       if (remaining.startsWith('data: ')) {
         const data = remaining.slice(6).trim();
         if (data !== '[DONE]') {
+          let parsed: { content?: string; error?: string } | null = null;
           try {
-            const parsed = JSON.parse(data);
-            if (parsed.content) {
-              fullContent += parsed.content;
-              params.onToken?.(fullContent);
-            }
+            parsed = JSON.parse(data);
           } catch {
             // skip unparseable chunks
+          }
+          if (parsed?.error) {
+            throw new Error(parsed.error);
+          }
+          if (parsed?.content) {
+            fullContent += parsed.content;
+            params.onToken?.(fullContent);
           }
         }
       }

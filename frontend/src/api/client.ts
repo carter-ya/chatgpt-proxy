@@ -73,10 +73,12 @@ export const chat = {
     stream = true,
     genId?: string,
     attachmentFileId?: string,
+    signal?: AbortSignal,
   ) => {
     return fetch(`${API_BASE}/conversation`, {
       method: 'POST',
       headers: getAuthHeaders(),
+      signal,
       body: JSON.stringify({
         message,
         model,

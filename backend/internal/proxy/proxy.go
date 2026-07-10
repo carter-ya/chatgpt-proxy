@@ -98,6 +98,8 @@ func routeForPath(path string) string {
 	switch {
 	case len(path) >= 22 && path[:22] == "/backend-api/f/conversation":
 		return "conversation"
+	case len(path) >= 25 && path[:25] == "/backend-api/conversation/":
+		return "conversation"
 	case len(path) >= 13 && path[:13] == "/backend-api/files":
 		return "files"
 	case len(path) >= 25 && path[:25] == "/backend-api/conversations":

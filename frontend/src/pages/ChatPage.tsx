@@ -28,6 +28,7 @@ export default function ChatPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const streamMsgIdRef = useRef<string | null>(null);
+  const pendingConversationIdRef = useRef<string | null>(null);
 
   const loadMessages = useCallback(async (convId: string) => {
     setLoadingMessages(true);
@@ -84,8 +85,9 @@ export default function ChatPage() {
         genId: genId || undefined,
         attachmentFileId: attachmentFileId || undefined,
         onConversationCreated: (newConvId) => {
-          navigate(`/chat/${newConvId}`, { replace: true });
-          loadConversations();
+          if (!conversationId) {
+            pendingConversationIdRef.current = newConvId;
+          }
         },
         onToken: (fullContent) => {
           setMessages((prev) =>
@@ -105,6 +107,11 @@ export default function ChatPage() {
             ),
           );
           streamMsgIdRef.current = null;
+          const pendingConversationId = pendingConversationIdRef.current;
+          pendingConversationIdRef.current = null;
+          if (pendingConversationId && !conversationId) {
+            navigate(`/chat/${pendingConversationId}`, { replace: true });
+          }
           loadConversations();
         },
         onError: (err) => {
@@ -116,6 +123,7 @@ export default function ChatPage() {
             ),
           );
           streamMsgIdRef.current = null;
+          pendingConversationIdRef.current = null;
         },
       });
     },

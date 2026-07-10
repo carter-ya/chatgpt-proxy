@@ -12,11 +12,13 @@ func TestSessionTokensLoaded(t *testing.T) {
 	os.Setenv("XIAOMING_JWT_SECRET", "test-jwt-secret")
 	os.Setenv("XIAOMING_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
 	os.Setenv("XIAOMING_SESSION_TOKENS", "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0.test-token-payload")
+	os.Setenv("XIAOMING_JWT_EXPIRATION", "24h")
 	defer func() {
 		os.Unsetenv("XIAOMING_DATABASE_URL")
 		os.Unsetenv("XIAOMING_JWT_SECRET")
 		os.Unsetenv("XIAOMING_ENCRYPTION_KEY")
 		os.Unsetenv("XIAOMING_SESSION_TOKENS")
+		os.Unsetenv("XIAOMING_JWT_EXPIRATION")
 	}()
 
 	cfg, err := Load()
@@ -41,12 +43,14 @@ func TestOtherEnvVarsStillWork(t *testing.T) {
 	os.Setenv("XIAOMING_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
 	os.Setenv("XIAOMING_CHATGPT_BASE_URL", "https://chat.openai.com")
 	os.Setenv("XIAOMING_SESSION_TOKENS", "token1,token2,token3")
+	os.Setenv("XIAOMING_JWT_EXPIRATION", "24h")
 	defer func() {
 		os.Unsetenv("XIAOMING_DATABASE_URL")
 		os.Unsetenv("XIAOMING_JWT_SECRET")
 		os.Unsetenv("XIAOMING_ENCRYPTION_KEY")
 		os.Unsetenv("XIAOMING_CHATGPT_BASE_URL")
 		os.Unsetenv("XIAOMING_SESSION_TOKENS")
+		os.Unsetenv("XIAOMING_JWT_EXPIRATION")
 	}()
 
 	cfg, err := Load()
@@ -91,11 +95,13 @@ func TestSessionTokensSingleToken(t *testing.T) {
 	os.Setenv("XIAOMING_JWT_SECRET", "test-jwt-secret")
 	os.Setenv("XIAOMING_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
 	os.Setenv("XIAOMING_SESSION_TOKENS", "single-token-without-commas")
+	os.Setenv("XIAOMING_JWT_EXPIRATION", "24h")
 	defer func() {
 		os.Unsetenv("XIAOMING_DATABASE_URL")
 		os.Unsetenv("XIAOMING_JWT_SECRET")
 		os.Unsetenv("XIAOMING_ENCRYPTION_KEY")
 		os.Unsetenv("XIAOMING_SESSION_TOKENS")
+		os.Unsetenv("XIAOMING_JWT_EXPIRATION")
 	}()
 
 	cfg, err := Load()
@@ -110,6 +116,23 @@ func TestSessionTokensSingleToken(t *testing.T) {
 		t.Errorf("SessionTokens[0] = %q, 预期 %q", cfg.SessionTokens[0], "single-token-without-commas")
 	}
 	t.Logf("SessionTokens[0] = %s", cfg.SessionTokens[0])
+}
+
+func TestJWTExpirationRequiresDurationUnit(t *testing.T) {
+	os.Setenv("XIAOMING_DATABASE_URL", "postgres://test:test@localhost:5432/testdb")
+	os.Setenv("XIAOMING_JWT_SECRET", "test-jwt-secret")
+	os.Setenv("XIAOMING_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
+	os.Setenv("XIAOMING_JWT_EXPIRATION", "24")
+	defer func() {
+		os.Unsetenv("XIAOMING_DATABASE_URL")
+		os.Unsetenv("XIAOMING_JWT_SECRET")
+		os.Unsetenv("XIAOMING_ENCRYPTION_KEY")
+		os.Unsetenv("XIAOMING_JWT_EXPIRATION")
+	}()
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() 成功，预期缺少 duration 单位时失败")
+	}
 }
 
 func minInt(a, b int) int {

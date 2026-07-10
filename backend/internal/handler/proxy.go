@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -72,13 +71,9 @@ func (h *ProxyHandler) Conversation(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(ctx, 55*time.Second)
 	defer cancel()
 
-	// Get an active token and attempt the request with retry on 401/403.
+	// Browser-profile mode authenticates upstream requests through sidecar Chrome.
 	resp, tokenValue, err := h.doConversationWithRetry(ctx, reqBody, userID)
 	if err != nil {
-		if errors.Is(err, session.ErrNoActiveToken) {
-			httpresp.Error(c, http.StatusServiceUnavailable, "所有 session token 均已失效，请稍后重试")
-			return
-		}
 		httpresp.Error(c, http.StatusInternalServerError, "代理请求失败: "+err.Error())
 		return
 	}
@@ -95,7 +90,7 @@ func (h *ProxyHandler) Conversation(c *gin.Context) {
 		// Check if response is valid JSON (not Cloudflare challenge HTML).
 		if !json.Valid(body) {
 			log.Printf("[Proxy] 非 JSON 响应 (Conversation 非流式) status=%d body_prefix=%.200s", resp.StatusCode, string(body))
-			c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
+			writeProxyError(c, resp.StatusCode, body, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
 			return
 		}
 
@@ -107,30 +102,24 @@ func (h *ProxyHandler) Conversation(c *gin.Context) {
 	// Gate: reject non-event-stream responses before streaming (R-1.14).
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		log.Printf("[Proxy] 非 JSON 响应 (Conversation 流式) status=%d content_type=%s", resp.StatusCode, resp.Header.Get("Content-Type"))
-		c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
+		body, _ := io.ReadAll(resp.Body)
+		writeProxyError(c, resp.StatusCode, body, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
 		return
 	}
 	if err := proxy.StreamSSE(c, resp); err != nil {
 		// SSE streaming errors are logged but the response may already be partially sent.
 		log.Printf("[Proxy] SSE 流异常: %v", err)
-		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
-		if findErr == nil && token != nil {
-			if markErr := h.sessionManager.MarkTokenExpired(ctx, token.ID); markErr != nil {
-				log.Printf("[Proxy] 标记 token 失效失败: %v", markErr)
-			}
-		}
+		h.markTokenExpiredByValue(ctx, tokenValue)
 		return
 	}
 }
 
-// doConversationWithRetry attempts the conversation request with one retry on 401/403.
+// doConversationWithRetry sends the conversation request through sidecar Chrome.
+// The token return value is retained for the old interface but is always empty in browser-profile mode.
 func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conversationRequest, userID interface{}) (*http.Response, string, error) {
-	tokenValue, err := h.sessionManager.GetActiveToken(ctx)
-	if err != nil {
-		return nil, "", err
-	}
+	tokenValue := ""
 
-	now := time.Now().Unix()
+	now := float64(time.Now().UnixMilli()) / 1000
 
 	// Build the user message — multimodal when attachment_file_id is present.
 	var userMessage map[string]interface{}
@@ -153,6 +142,7 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 				},
 			},
 			"metadata": map[string]interface{}{
+				"selected_sources": []interface{}{},
 				"serialization_metadata": map[string]interface{}{
 					"custom_symbol_offsets": []interface{}{},
 				},
@@ -168,6 +158,7 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 				"parts":        []string{reqBody.Message},
 			},
 			"metadata": map[string]interface{}{
+				"selected_sources": []interface{}{},
 				"serialization_metadata": map[string]interface{}{
 					"custom_symbol_offsets": []interface{}{},
 				},
@@ -175,44 +166,50 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 		}
 	}
 
-	// Default model to "auto" when empty (R-1.3: empty model causes 422).
+	// Default to the model currently used by the web app. Older slugs such as
+	// gpt-4o/auto are more likely to hit the web anti-abuse path on /f/conversation.
 	model := reqBody.Model
-	if model == "" {
-		model = "auto"
+	if model == "" || model == "auto" || model == "gpt-4o" {
+		model = "gpt-5-6-thinking"
 	}
 
 	// Build the upstream request body matching chatgpt.com's current /backend-api/f/conversation format.
 	upstreamBody := map[string]interface{}{
-		"action":                       "next",
-		"messages":                     []map[string]interface{}{userMessage},
-		"model":                        model,
-		"parent_message_id":            uuid.New().String(),
-		"stream":                       reqBody.Stream,
-		"timezone_offset_min":          0,
-		"timezone":                     "UTC",
-		"history_and_training_disabled": true,
+		"action":               "next",
+		"messages":             []map[string]interface{}{userMessage},
+		"model":                model,
+		"parent_message_id":    "client-created-root",
+		"client_prepare_state": "none",
+		"timezone_offset_min":  -480,
+		"timezone":             "Asia/Shanghai",
 		"conversation_mode": map[string]interface{}{
 			"kind": "primary_assistant",
 		},
-		"supports_buffering":       true,
-		"supported_encodings":      []string{"v1"},
-		"system_hints":             []interface{}{},
-		"enable_message_followups": true,
+		"supports_buffering":                   true,
+		"supported_encodings":                  []string{"v1"},
+		"system_hints":                         []interface{}{},
+		"enable_message_followups":             true,
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
 		"client_contextual_info": map[string]interface{}{
-			"is_dark_mode":      true,
-			"time_since_loaded": 0,
-			"page_height":       1000,
-			"page_width":        1000,
-			"pixel_ratio":       1,
-			"screen_height":     1000,
-			"screen_width":      1000,
-			"app_name":          "chatgpt.com",
+			"is_dark_mode":                     false,
+			"time_since_loaded":                0,
+			"page_height":                      452,
+			"page_width":                       1282,
+			"pixel_ratio":                      2,
+			"screen_height":                    1280,
+			"screen_width":                     1920,
+			"app_name":                         "chatgpt.com",
+			"has_web_push_capabilities":        true,
+			"web_push_notification_permission": "default",
 		},
+	}
+	if model == "gpt-5-6-thinking" {
+		upstreamBody["thinking_effort"] = "max"
 	}
 	if reqBody.ConversationID != "" {
 		upstreamBody["conversation_id"] = reqBody.ConversationID
+		upstreamBody["parent_message_id"] = uuid.New().String()
 	}
 	if reqBody.GenID != "" {
 		upstreamBody["gen_id"] = reqBody.GenID
@@ -235,32 +232,6 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, "", fmt.Errorf("代理请求失败: %w", err)
-	}
-
-	// Check for 401/403 → mark token expired and retry once.
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		resp.Body.Close()
-
-		// Mark token as expired.
-		log.Printf("[Proxy] token 已失效 token_prefix=%.8s...", tokenValue[:min(8, len(tokenValue))])
-		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
-		if findErr == nil && token != nil {
-			_ = h.sessionManager.MarkTokenExpired(ctx, token.ID)
-		}
-
-		// Retry with a different token.
-		retryToken, retryErr := h.sessionManager.GetActiveToken(ctx)
-		if retryErr != nil {
-			return nil, "", retryErr
-		}
-
-		req2, buildErr := h.client.BuildRequest(ctx, http.MethodPost, path, retryToken, bytes.NewReader(bodyJSON), "application/json")
-		if buildErr != nil {
-			return nil, "", buildErr
-		}
-
-		resp2, doErr := h.client.Do(req2)
-		return resp2, retryToken, doErr
 	}
 
 	return resp, tokenValue, nil
@@ -296,16 +267,7 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 		return
 	}
 
-	// Get active token.
-	tokenValue, err := h.sessionManager.GetActiveToken(ctx)
-	if err != nil {
-		if errors.Is(err, session.ErrNoActiveToken) {
-			httpresp.Error(c, http.StatusServiceUnavailable, "所有 session token 均已失效，请稍后重试")
-			return
-		}
-		httpresp.Error(c, http.StatusInternalServerError, "获取 session token 失败")
-		return
-	}
+	tokenValue := ""
 
 	// Build multipart body for upstream.
 	var buf bytes.Buffer
@@ -337,12 +299,7 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 
 	// Handle 401/403 for file upload as well.
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		log.Printf("[Proxy] token 已失效 token_prefix=%.8s...", tokenValue[:min(8, len(tokenValue))])
-		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
-		if findErr == nil && token != nil {
-			_ = h.sessionManager.MarkTokenExpired(ctx, token.ID)
-		}
-		httpresp.Error(c, http.StatusServiceUnavailable, "session token 已失效")
+		httpresp.Error(c, http.StatusServiceUnavailable, "浏览器登录态不可用，请在 sidecar Chrome 中重新登录后重试")
 		return
 	}
 
@@ -356,7 +313,7 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 	// Check for non-JSON response (Cloudflare challenge).
 	if !json.Valid(body) {
 		log.Printf("[Proxy] 非 JSON 响应 (UploadFile) status=%d body_prefix=%.200s", resp.StatusCode, string(body))
-		c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
+		writeProxyError(c, resp.StatusCode, body, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
 		return
 	}
 
@@ -377,15 +334,7 @@ func (h *ProxyHandler) ListConversations(c *gin.Context) {
 		return
 	}
 
-	tokenValue, err := h.sessionManager.GetActiveToken(ctx)
-	if err != nil {
-		if errors.Is(err, session.ErrNoActiveToken) {
-			httpresp.Error(c, http.StatusServiceUnavailable, "所有 session token 均已失效，请稍后重试")
-			return
-		}
-		httpresp.Error(c, http.StatusInternalServerError, "获取 session token 失败")
-		return
-	}
+	tokenValue := ""
 
 	upstreamPath := "/backend-api/conversations"
 	req, err := h.client.BuildRequest(ctx, http.MethodGet, upstreamPath, tokenValue, nil, "application/json")
@@ -402,12 +351,7 @@ func (h *ProxyHandler) ListConversations(c *gin.Context) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		log.Printf("[Proxy] token 已失效 token_prefix=%.8s...", tokenValue[:min(8, len(tokenValue))])
-		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
-		if findErr == nil && token != nil {
-			_ = h.sessionManager.MarkTokenExpired(ctx, token.ID)
-		}
-		httpresp.Error(c, http.StatusServiceUnavailable, "session token 已失效")
+		httpresp.Error(c, http.StatusServiceUnavailable, "浏览器登录态不可用，请在 sidecar Chrome 中重新登录后重试")
 		return
 	}
 
@@ -419,7 +363,7 @@ func (h *ProxyHandler) ListConversations(c *gin.Context) {
 
 	if !json.Valid(body) {
 		log.Printf("[Proxy] 非 JSON 响应 (ListConversations) status=%d body_prefix=%.200s", resp.StatusCode, string(body))
-		c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
+		writeProxyError(c, resp.StatusCode, body, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
 		return
 	}
 
@@ -466,7 +410,7 @@ func (h *ProxyHandler) GetConversation(c *gin.Context) {
 		}
 	}
 
-	h.proxyGet(c, "/backend-api/conversations/"+convID)
+	h.proxyGet(c, "/backend-api/conversation/"+convID)
 }
 
 // filterConversationsByOwner takes the raw upstream JSON response body,
@@ -564,15 +508,7 @@ func (h *ProxyHandler) UpdateConversation(c *gin.Context) {
 func (h *ProxyHandler) proxyGet(c *gin.Context, upstreamPath string) {
 	ctx := c.Request.Context()
 
-	tokenValue, err := h.sessionManager.GetActiveToken(ctx)
-	if err != nil {
-		if errors.Is(err, session.ErrNoActiveToken) {
-			httpresp.Error(c, http.StatusServiceUnavailable, "所有 session token 均已失效，请稍后重试")
-			return
-		}
-		httpresp.Error(c, http.StatusInternalServerError, "获取 session token 失败")
-		return
-	}
+	tokenValue := ""
 
 	req, err := h.client.BuildRequest(ctx, http.MethodGet, upstreamPath, tokenValue, nil, "application/json")
 	if err != nil {
@@ -588,12 +524,7 @@ func (h *ProxyHandler) proxyGet(c *gin.Context, upstreamPath string) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		log.Printf("[Proxy] token 已失效 token_prefix=%.8s...", tokenValue[:min(8, len(tokenValue))])
-		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
-		if findErr == nil && token != nil {
-			_ = h.sessionManager.MarkTokenExpired(ctx, token.ID)
-		}
-		httpresp.Error(c, http.StatusServiceUnavailable, "session token 已失效")
+		httpresp.Error(c, http.StatusServiceUnavailable, "浏览器登录态不可用，请在 sidecar Chrome 中重新登录后重试")
 		return
 	}
 
@@ -605,7 +536,7 @@ func (h *ProxyHandler) proxyGet(c *gin.Context, upstreamPath string) {
 
 	if !json.Valid(body) {
 		log.Printf("[Proxy] 非 JSON 响应 (proxyGet) path=%s status=%d body_prefix=%.200s", upstreamPath, resp.StatusCode, string(body))
-		c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
+		writeProxyError(c, resp.StatusCode, body, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
 		return
 	}
 
@@ -616,15 +547,7 @@ func (h *ProxyHandler) proxyGet(c *gin.Context, upstreamPath string) {
 func (h *ProxyHandler) proxyWithBody(c *gin.Context, method, upstreamPath string) {
 	ctx := c.Request.Context()
 
-	tokenValue, err := h.sessionManager.GetActiveToken(ctx)
-	if err != nil {
-		if errors.Is(err, session.ErrNoActiveToken) {
-			httpresp.Error(c, http.StatusServiceUnavailable, "所有 session token 均已失效，请稍后重试")
-			return
-		}
-		httpresp.Error(c, http.StatusInternalServerError, "获取 session token 失败")
-		return
-	}
+	tokenValue := ""
 
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -646,12 +569,7 @@ func (h *ProxyHandler) proxyWithBody(c *gin.Context, method, upstreamPath string
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		log.Printf("[Proxy] token 已失效 token_prefix=%.8s...", tokenValue[:min(8, len(tokenValue))])
-		token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
-		if findErr == nil && token != nil {
-			_ = h.sessionManager.MarkTokenExpired(ctx, token.ID)
-		}
-		httpresp.Error(c, http.StatusServiceUnavailable, "session token 已失效")
+		httpresp.Error(c, http.StatusServiceUnavailable, "浏览器登录态不可用，请在 sidecar Chrome 中重新登录后重试")
 		return
 	}
 
@@ -663,9 +581,32 @@ func (h *ProxyHandler) proxyWithBody(c *gin.Context, method, upstreamPath string
 
 	if !json.Valid(body) {
 		log.Printf("[Proxy] 非 JSON 响应 (proxyWithBody) path=%s status=%d body_prefix=%.200s", upstreamPath, resp.StatusCode, string(body))
-		c.JSON(http.StatusBadGateway, gin.H{"error": "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）"})
+		writeProxyError(c, resp.StatusCode, body, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
 		return
 	}
 
 	c.Data(resp.StatusCode, "application/json", body)
+}
+
+func (h *ProxyHandler) markTokenExpiredByValue(ctx context.Context, tokenValue string) {
+	if tokenValue == "" {
+		return
+	}
+	token, findErr := h.sessionManager.GetTokenByValue(ctx, tokenValue)
+	if findErr == nil && token != nil {
+		if markErr := h.sessionManager.MarkTokenExpired(ctx, token.ID); markErr != nil {
+			log.Printf("[Proxy] 标记 token 失效失败: %v", markErr)
+		}
+	}
+}
+
+func writeProxyError(c *gin.Context, statusCode int, body []byte, fallback string) {
+	if statusCode == 0 {
+		statusCode = http.StatusBadGateway
+	}
+	if statusCode >= http.StatusBadRequest && json.Valid(body) {
+		c.Data(statusCode, "application/json", body)
+		return
+	}
+	c.JSON(http.StatusBadGateway, gin.H{"error": fallback})
 }

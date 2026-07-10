@@ -1,6 +1,7 @@
 {
   "includes": [
     "backend/.app/targets.json",
-    "frontend/.app/targets.json"
+    "frontend/.app/targets.json",
+    "sidecar/.app/targets.json"
   ]
 }

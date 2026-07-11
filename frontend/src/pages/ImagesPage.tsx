@@ -107,7 +107,8 @@ export default function ImagesPage() {
             >
               <ChatMessage role="assistant" content="" images={[image]} />
               {images.length > 1 && (
-                <button type="button" onClick={() => {
+                <button type="button" onClick={(event) => {
+                  event.stopPropagation();
                   setSelectedImage(image.file_id);
                   void chat.selectImage().catch((err) => setError(err instanceof Error ? err.message : String(err)));
                 }}>

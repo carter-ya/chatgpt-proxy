@@ -44,6 +44,13 @@ type Conversation struct {
 	Title  string
 }
 
+type File struct {
+	ID           string
+	UserID       string
+	FileName     string
+	GenerationID string
+}
+
 type CreateUserParams struct {
 	Email          string
 	HashedPassword string
@@ -113,6 +120,19 @@ func (q *Queries) CreateConversation(ctx context.Context, id, userID, title stri
 	return err
 }
 
+// BindConversation creates an ownership mapping and verifies that an existing
+// mapping belongs to the same user. It never transfers ownership.
+func (q *Queries) BindConversation(ctx context.Context, id, userID, title string) (bool, error) {
+	if err := q.CreateConversation(ctx, id, userID, title); err != nil {
+		return false, err
+	}
+	conversation, err := q.GetConversationByID(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return conversation.UserID == userID, nil
+}
+
 // GetConversationByID returns a conversation by its id.
 // Returns a zero-value Conversation and an error (pgx.ErrNoRows) if not found.
 func (q *Queries) GetConversationByID(ctx context.Context, id string) (Conversation, error) {
@@ -143,4 +163,34 @@ func (q *Queries) ListConversationIDsByUser(ctx context.Context, userID string) 
 		return nil, err
 	}
 	return ids, nil
+}
+
+func (q *Queries) CreateFile(ctx context.Context, id, userID, fileName, generationID string) error {
+	const sql = `INSERT INTO files (id, user_id, file_name, generation_id) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (id) DO UPDATE SET generation_id = CASE
+			WHEN files.user_id = EXCLUDED.user_id AND files.generation_id = '' THEN EXCLUDED.generation_id
+			ELSE files.generation_id
+		END`
+	_, err := q.db.Exec(ctx, sql, id, userID, fileName, generationID)
+	return err
+}
+
+func (q *Queries) GetFileByID(ctx context.Context, id string) (File, error) {
+	const sql = `SELECT id, user_id, file_name, generation_id FROM files WHERE id = $1`
+	var file File
+	err := q.db.QueryRow(ctx, sql, id).Scan(&file.ID, &file.UserID, &file.FileName, &file.GenerationID)
+	return file, err
+}
+
+// BindFile creates an ownership mapping and verifies that an existing mapping
+// belongs to the same user. It never transfers ownership.
+func (q *Queries) BindFile(ctx context.Context, id, userID, fileName, generationID string) (bool, error) {
+	if err := q.CreateFile(ctx, id, userID, fileName, generationID); err != nil {
+		return false, err
+	}
+	file, err := q.GetFileByID(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return file.UserID == userID, nil
 }

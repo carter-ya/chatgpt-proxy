@@ -121,8 +121,12 @@ export const chat = {
     });
   },
 
-  selectImage: async () => {
-    const response = await fetch(`${API_BASE}/images/select`, { method: 'POST', headers: getAuthHeaders(), body: '{}' });
+  selectImage: async (conversationId: string, fileId: string) => {
+    const response = await fetch(`${API_BASE}/images/select`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ conversation_id: conversationId, file_id: fileId }),
+    });
     if (!response.ok) throw new Error(`候选图片反馈失败: HTTP ${response.status}`);
   },
 

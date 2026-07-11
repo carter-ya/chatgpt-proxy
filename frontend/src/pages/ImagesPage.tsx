@@ -110,7 +110,7 @@ export default function ImagesPage() {
                 <button type="button" onClick={(event) => {
                   event.stopPropagation();
                   setSelectedImage(image.file_id);
-                  void chat.selectImage().catch((err) => setError(err instanceof Error ? err.message : String(err)));
+                  void chat.selectImage(conversationId, image.file_id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
                 }}>
                   {selectedImage === image.file_id ? '已选择' : `选择第 ${index + 1} 张`}
                 </button>

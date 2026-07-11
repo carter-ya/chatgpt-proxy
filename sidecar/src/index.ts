@@ -1743,7 +1743,9 @@ function extractGeneratedImages(parsed: any): StreamImage[] {
       width: Number(part.width || 0),
       height: Number(part.height || 0),
       download_url: `/api/files/${encodeURIComponent(fileId)}/download`,
-      generation_id: typeof part?.metadata?.generation?.gen_id === 'string' ? part.metadata.generation.gen_id : (typeof part?.metadata?.dalle?.gen_id === 'string' ? part.metadata.dalle.gen_id : undefined),
+      generation_id: typeof part?.metadata?.generation?.gen_id === 'string'
+        ? part.metadata.generation.gen_id
+        : (typeof part?.metadata?.dalle?.gen_id === 'string' ? part.metadata.dalle.gen_id : undefined),
     });
   }
   return images;
@@ -2557,6 +2559,11 @@ async function handleStreamProxy(
                         width: Number(part.width || 0),
                         height: Number(part.height || 0),
                         download_url: `/api/files/${encodeURIComponent(fileId)}/download`,
+                        generation_id: typeof part?.metadata?.generation?.gen_id === 'string'
+                          ? part.metadata.generation.gen_id
+                          : (typeof part?.metadata?.dalle?.gen_id === 'string'
+                            ? part.metadata.dalle.gen_id
+                            : undefined),
                       });
                     }
                   }

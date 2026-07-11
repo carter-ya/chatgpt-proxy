@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // ProxyHandler holds dependencies for proxy HTTP handlers.
@@ -81,13 +83,14 @@ type upstreamFileDownloadResponse struct {
 }
 
 type apiFileAsset struct {
-	FileID      string `json:"file_id"`
-	FileName    string `json:"file_name"`
-	MIMEType    string `json:"mime_type"`
-	SizeBytes   int64  `json:"size_bytes"`
-	Width       int    `json:"width"`
-	Height      int    `json:"height"`
-	DownloadURL string `json:"download_url"`
+	FileID       string `json:"file_id"`
+	FileName     string `json:"file_name"`
+	MIMEType     string `json:"mime_type"`
+	SizeBytes    int64  `json:"size_bytes"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	DownloadURL  string `json:"download_url"`
+	GenerationID string `json:"generation_id,omitempty"`
 }
 
 type apiMessage struct {
@@ -144,6 +147,22 @@ func (h *ProxyHandler) ImageGeneration(c *gin.Context) {
 
 // ImageSelection forwards the Images workspace candidate-selection signal.
 func (h *ProxyHandler) ImageSelection(c *gin.Context) {
+	var selection struct {
+		ConversationID string `json:"conversation_id"`
+		FileID         string `json:"file_id"`
+	}
+	if err := c.ShouldBindJSON(&selection); err != nil || selection.ConversationID == "" || selection.FileID == "" {
+		httpresp.Error(c, http.StatusBadRequest, "候选图片缺少对话或文件标识")
+		return
+	}
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
+	if !h.requireConversationOwner(c, selection.ConversationID, userID) || !h.requireFileOwner(c, selection.FileID, userID) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 	req, err := h.client.BuildRequest(ctx, http.MethodPost, "/backend-api/image-gen/message-select", "", bytes.NewReader([]byte(`{}`)), "application/json")
@@ -151,7 +170,7 @@ func (h *ProxyHandler) ImageSelection(c *gin.Context) {
 		httpresp.Error(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := h.client.Do(req)
 	if err != nil {
 		httpresp.Error(c, http.StatusBadGateway, err.Error())
 		return
@@ -163,6 +182,36 @@ func (h *ProxyHandler) ImageSelection(c *gin.Context) {
 
 func (h *ProxyHandler) proxyConversation(c *gin.Context, reqBody conversationRequest) {
 	ctx := c.Request.Context()
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
+	if reqBody.ConversationID != "" && !h.requireConversationOwner(c, reqBody.ConversationID, userID) {
+		return
+	}
+	if reqBody.OriginalFileID != "" && !h.requireImageSource(c, reqBody.OriginalFileID, reqBody.OriginalGenID, userID) {
+		return
+	}
+	fileIDs := map[string]struct{}{}
+	if reqBody.OriginalFileID != "" {
+		fileIDs[reqBody.OriginalFileID] = struct{}{}
+	}
+	if reqBody.Attachment != nil && reqBody.Attachment.FileID != "" {
+		fileIDs[reqBody.Attachment.FileID] = struct{}{}
+	}
+	if reqBody.AttachmentFileID != "" {
+		fileIDs[reqBody.AttachmentFileID] = struct{}{}
+	}
+	for fileID := range fileIDs {
+		if !h.requireFileOwner(c, fileID, userID) {
+			return
+		}
+	}
+	if !reqBody.Stream && reqBody.ConversationID == "" {
+		httpresp.Error(c, http.StatusBadRequest, "创建新对话必须使用流式响应以建立安全归属")
+		return
+	}
 
 	// Image generation regularly exceeds one minute; keep a finite upper bound
 	// without terminating valid long-running handoff streams.
@@ -204,7 +253,10 @@ func (h *ProxyHandler) proxyConversation(c *gin.Context, reqBody conversationReq
 		writeProxyError(c, resp.StatusCode, body, "上游返回了非 JSON 响应（可能触发了 Cloudflare 验证）")
 		return
 	}
-	if err := proxy.StreamSSE(c, resp); err != nil {
+	observer := func(line string) error {
+		return h.bindResourcesFromSSE(ctx, userID, line)
+	}
+	if err := proxy.StreamSSEWithObserver(c, resp, observer); err != nil {
 		// SSE streaming errors are logged but the response may already be partially sent.
 		log.Printf("[Proxy] SSE 流异常: %v", err)
 		h.markTokenExpiredByValue(ctx, tokenValue)
@@ -388,6 +440,11 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 // create a file record, PUT bytes to signed storage, then confirm the upload.
 func (h *ProxyHandler) UploadFile(c *gin.Context) {
 	ctx := c.Request.Context()
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
 
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
@@ -471,6 +528,15 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 		writeProxyError(c, confirmStatus, confirmBody, "确认文件上传失败")
 		return
 	}
+	owned, err := h.queries.BindFile(ctx, created.FileID, userID, fileName, "")
+	if err != nil {
+		httpresp.Error(c, http.StatusInternalServerError, "保存文件归属失败")
+		return
+	}
+	if !owned {
+		httpresp.Error(c, http.StatusForbidden, "文件已属于其他用户")
+		return
+	}
 
 	width, height := 0, 0
 	if strings.HasPrefix(contentType, "image/") {
@@ -496,6 +562,14 @@ func (h *ProxyHandler) DownloadFile(c *gin.Context) {
 	fileID := strings.TrimSpace(c.Param("id"))
 	if fileID == "" {
 		httpresp.Error(c, http.StatusBadRequest, "文件 ID 不能为空")
+		return
+	}
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
+	if !h.requireFileOwner(c, fileID, userID) {
 		return
 	}
 
@@ -613,7 +687,7 @@ func fileUseCase(contentType string) string {
 
 // ListConversations handles GET /api/conversations.
 // Proxies to upstream, then filters the response to only include conversations
-// owned by the current authenticated user. Auto-registers new conversations.
+// already owned by the current authenticated user.
 func (h *ProxyHandler) ListConversations(c *gin.Context) {
 	ctx := c.Request.Context()
 
@@ -661,8 +735,8 @@ func (h *ProxyHandler) ListConversations(c *gin.Context) {
 	// Filter upstream response by conversation ownership.
 	filtered, filterErr := h.filterConversationsByOwner(ctx, body, userIDStr)
 	if filterErr != nil {
-		log.Printf("[Proxy] ListConversations 过滤失败: %v，返回原始上游响应", filterErr)
-		c.Data(resp.StatusCode, "application/json", body)
+		log.Printf("[Proxy] ListConversations 过滤失败: %v", filterErr)
+		httpresp.Error(c, http.StatusInternalServerError, "读取用户对话归属失败")
 		return
 	}
 
@@ -670,8 +744,8 @@ func (h *ProxyHandler) ListConversations(c *gin.Context) {
 }
 
 // GetConversation handles GET /api/conversations/:id.
-// Checks local conversation ownership before proxying. Returns 403 if the
-// conversation belongs to a different user. Auto-registers on first access.
+// Checks local conversation ownership before proxying. Unknown conversations
+// return 404 and conversations owned by another user return 403.
 func (h *ProxyHandler) GetConversation(c *gin.Context) {
 	ctx := c.Request.Context()
 	convID := c.Param("id")
@@ -685,20 +759,8 @@ func (h *ProxyHandler) GetConversation(c *gin.Context) {
 	}
 
 	// Check local conversation ownership.
-	conv, err := h.queries.GetConversationByID(ctx, convID)
-	if err == nil {
-		// Conversation exists locally — check ownership.
-		if conv.UserID != userIDStr {
-			httpresp.Error(c, http.StatusForbidden, "无权访问该对话")
-			return
-		}
-		// Owned by current user — proceed to proxy.
-	} else {
-		// Not found locally — auto-register and proceed.
-		log.Printf("[Proxy] GetConversation: 自动注册对话 convID=%s userID=%s", convID, userIDStr)
-		if regErr := h.queries.CreateConversation(ctx, convID, userIDStr, ""); regErr != nil {
-			log.Printf("[Proxy] GetConversation: 自动注册失败 convID=%s err=%v", convID, regErr)
-		}
+	if !h.requireConversationOwner(c, convID, userIDStr) {
+		return
 	}
 
 	req, err := h.client.BuildRequest(ctx, http.MethodGet, "/backend-api/conversation/"+url.PathEscape(convID), "", nil, "application/json")
@@ -724,6 +786,10 @@ func (h *ProxyHandler) GetConversation(c *gin.Context) {
 	normalized, err := normalizeConversationDetail(body, convID)
 	if err != nil {
 		httpresp.Error(c, http.StatusBadGateway, "解析上游对话详情失败")
+		return
+	}
+	if err := h.bindFilesFromConversation(ctx, userIDStr, normalized); err != nil {
+		httpresp.Error(c, http.StatusInternalServerError, "保存对话文件归属失败")
 		return
 	}
 	c.JSON(http.StatusOK, normalized)
@@ -855,14 +921,24 @@ func generatedAssetsFromParts(parts []interface{}, seen map[string]bool) []apiFi
 		if mimeType == "" {
 			mimeType = "image/png"
 		}
+		generationID := ""
+		if generation, ok := partMetadata["generation"].(map[string]interface{}); ok {
+			generationID, _ = generation["gen_id"].(string)
+		}
+		if generationID == "" {
+			if dalle, ok := partMetadata["dalle"].(map[string]interface{}); ok {
+				generationID, _ = dalle["gen_id"].(string)
+			}
+		}
 		assets = append(assets, apiFileAsset{
-			FileID:      fileID,
-			FileName:    fileID + ".png",
-			MIMEType:    mimeType,
-			SizeBytes:   int64(numberValue(part["size_bytes"])),
-			Width:       int(numberValue(part["width"])),
-			Height:      int(numberValue(part["height"])),
-			DownloadURL: "/api/files/" + url.PathEscape(fileID) + "/download",
+			FileID:       fileID,
+			FileName:     fileID + ".png",
+			MIMEType:     mimeType,
+			SizeBytes:    int64(numberValue(part["size_bytes"])),
+			Width:        int(numberValue(part["width"])),
+			Height:       int(numberValue(part["height"])),
+			DownloadURL:  "/api/files/" + url.PathEscape(fileID) + "/download",
+			GenerationID: generationID,
 		})
 	}
 	return assets
@@ -883,10 +959,132 @@ func numberValue(value interface{}) float64 {
 	}
 }
 
+func authenticatedUserID(c *gin.Context) (string, bool) {
+	value, exists := c.Get("user_id")
+	if !exists {
+		return "", false
+	}
+	userID, ok := value.(string)
+	return userID, ok && userID != ""
+}
+
+func (h *ProxyHandler) requireConversationOwner(c *gin.Context, conversationID, userID string) bool {
+	conversation, err := h.queries.GetConversationByID(c.Request.Context(), conversationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpresp.Error(c, http.StatusNotFound, "对话不存在")
+		return false
+	}
+	if err != nil {
+		httpresp.Error(c, http.StatusInternalServerError, "读取对话归属失败")
+		return false
+	}
+	if conversation.UserID != userID {
+		httpresp.Error(c, http.StatusForbidden, "无权访问该对话")
+		return false
+	}
+	return true
+}
+
+func (h *ProxyHandler) requireFileOwner(c *gin.Context, fileID, userID string) bool {
+	file, err := h.queries.GetFileByID(c.Request.Context(), fileID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpresp.Error(c, http.StatusNotFound, "文件不存在")
+		return false
+	}
+	if err != nil {
+		httpresp.Error(c, http.StatusInternalServerError, "读取文件归属失败")
+		return false
+	}
+	if file.UserID != userID {
+		httpresp.Error(c, http.StatusForbidden, "无权访问该文件")
+		return false
+	}
+	return true
+}
+
+func (h *ProxyHandler) requireImageSource(c *gin.Context, fileID, generationID, userID string) bool {
+	file, err := h.queries.GetFileByID(c.Request.Context(), fileID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpresp.Error(c, http.StatusNotFound, "图片不存在")
+		return false
+	}
+	if err != nil {
+		httpresp.Error(c, http.StatusInternalServerError, "读取图片归属失败")
+		return false
+	}
+	if file.UserID != userID {
+		httpresp.Error(c, http.StatusForbidden, "无权编辑该图片")
+		return false
+	}
+	if generationID != "" && file.GenerationID != generationID {
+		httpresp.Error(c, http.StatusForbidden, "图片生成标识与文件不匹配")
+		return false
+	}
+	return true
+}
+
+func (h *ProxyHandler) bindResourcesFromSSE(ctx context.Context, userID, line string) error {
+	if !strings.HasPrefix(line, "data:") {
+		return nil
+	}
+	data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	if data == "" || data == "[DONE]" {
+		return nil
+	}
+	var payload struct {
+		ConversationID string         `json:"conversation_id"`
+		Images         []apiFileAsset `json:"images"`
+	}
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		return nil
+	}
+	if payload.ConversationID != "" {
+		owned, err := h.queries.BindConversation(ctx, payload.ConversationID, userID, "")
+		if err != nil {
+			return fmt.Errorf("保存对话归属: %w", err)
+		}
+		if !owned {
+			return errors.New("上游对话已属于其他用户")
+		}
+	}
+	for _, image := range payload.Images {
+		if image.FileID == "" {
+			continue
+		}
+		owned, err := h.queries.BindFile(ctx, image.FileID, userID, image.FileName, image.GenerationID)
+		if err != nil {
+			return fmt.Errorf("保存图片归属: %w", err)
+		}
+		if !owned {
+			return errors.New("上游图片已属于其他用户")
+		}
+	}
+	return nil
+}
+
+func (h *ProxyHandler) bindFilesFromConversation(ctx context.Context, userID string, normalized gin.H) error {
+	messages, _ := normalized["messages"].([]apiMessage)
+	for _, message := range messages {
+		assets := append(append([]apiFileAsset{}, message.Images...), message.Attachments...)
+		for _, asset := range assets {
+			if asset.FileID == "" {
+				continue
+			}
+			owned, err := h.queries.BindFile(ctx, asset.FileID, userID, asset.FileName, asset.GenerationID)
+			if err != nil {
+				return err
+			}
+			if !owned {
+				return errors.New("对话包含属于其他用户的文件")
+			}
+		}
+	}
+	return nil
+}
+
 // filterConversationsByOwner takes the raw upstream JSON response body,
-// extracts conversation IDs from the "items" array, cross-references with
-// the local DB, auto-registers new conversations, and returns a filtered
-// JSON response containing only conversations owned by the given user.
+// cross-references IDs with the local DB and returns only conversations owned
+// by the given user. Unknown upstream conversations are never auto-claimed.
 func (h *ProxyHandler) filterConversationsByOwner(ctx context.Context, body []byte, userID string) ([]byte, error) {
 	var response map[string]interface{}
 	if err := json.Unmarshal(body, &response); err != nil {
@@ -903,29 +1101,6 @@ func (h *ProxyHandler) filterConversationsByOwner(ctx context.Context, body []by
 		return nil, fmt.Errorf("上游响应的 items 字段不是数组")
 	}
 
-	if len(items) == 0 {
-		return body, nil
-	}
-
-	// Extract IDs from upstream items and their titles.
-	type upstreamConv struct {
-		id    string
-		title string
-	}
-	var upstream []upstreamConv
-	for _, item := range items {
-		obj, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		id, _ := obj["id"].(string)
-		if id == "" {
-			continue
-		}
-		title, _ := obj["title"].(string)
-		upstream = append(upstream, upstreamConv{id: id, title: title})
-	}
-
 	// Build a set of conversation IDs owned by the current user.
 	ownedIDs, err := h.queries.ListConversationIDsByUser(ctx, userID)
 	if err != nil {
@@ -934,17 +1109,6 @@ func (h *ProxyHandler) filterConversationsByOwner(ctx context.Context, body []by
 	ownedSet := make(map[string]bool, len(ownedIDs))
 	for _, id := range ownedIDs {
 		ownedSet[id] = true
-	}
-
-	// Auto-register any upstream conversations not yet in the local DB.
-	for _, uc := range upstream {
-		if !ownedSet[uc.id] {
-			if regErr := h.queries.CreateConversation(ctx, uc.id, userID, uc.title); regErr != nil {
-				log.Printf("[Proxy] filterConversationsByOwner: 自动注册失败 convID=%s err=%v", uc.id, regErr)
-			} else {
-				ownedSet[uc.id] = true
-			}
-		}
 	}
 
 	// Filter items to only owned conversations.
@@ -961,6 +1125,7 @@ func (h *ProxyHandler) filterConversationsByOwner(ctx context.Context, body []by
 	}
 
 	response["items"] = filtered
+	response["total"] = len(filtered)
 	result, err := json.Marshal(response)
 	if err != nil {
 		return nil, fmt.Errorf("序列化过滤后的响应失败: %w", err)
@@ -971,7 +1136,15 @@ func (h *ProxyHandler) filterConversationsByOwner(ctx context.Context, body []by
 // UpdateConversation handles PATCH /api/conversations/:id.
 func (h *ProxyHandler) UpdateConversation(c *gin.Context) {
 	id := c.Param("id")
-	h.proxyWithBody(c, http.MethodPatch, "/backend-api/conversation/"+id)
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
+	if !h.requireConversationOwner(c, id, userID) {
+		return
+	}
+	h.proxyWithBody(c, http.MethodPatch, "/backend-api/conversation/"+url.PathEscape(id))
 }
 
 // proxyGet is a helper for simple GET proxy endpoints.

@@ -24,7 +24,7 @@ func setupProtectedRouter(jwtSecret string) *gin.Engine {
 	return r
 }
 
-func generateValidToken(secret string, userID int32, email string) string {
+func generateValidToken(secret string, userID interface{}, email string) string {
 	now := time.Now()
 	claims := jwt.MapClaims{
 		"user_id": userID,
@@ -83,7 +83,7 @@ func TestProtectedRoute_InvalidToken(t *testing.T) {
 		token string
 	}{
 		{"expired token", generateExpiredToken("test-secret")},
-		{"wrong secret", generateValidToken("wrong-secret", 1, "test@example.com")},
+		{"wrong secret", generateValidToken("wrong-secret", "00000000-0000-0000-0000-000000000001", "test@example.com")},
 		{"garbage token", "eyJhbGciOiJIUzI1NiJ9.aaaa.bbbb"},
 	}
 
@@ -105,7 +105,7 @@ func TestProtectedRoute_ValidToken(t *testing.T) {
 	secret := "test-secret"
 	r := setupProtectedRouter(secret)
 
-	token := generateValidToken(secret, 42, "user@example.com")
+	token := generateValidToken(secret, "00000000-0000-0000-0000-000000000042", "user@example.com")
 	req := httptest.NewRequest(http.MethodGet, "/api/protected", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
@@ -113,6 +113,19 @@ func TestProtectedRoute_ValidToken(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestProtectedRoute_RejectsNonStringUserID(t *testing.T) {
+	secret := "test-secret"
+	r := setupProtectedRouter(secret)
+	token := generateValidToken(secret, 42, "user@example.com")
+	req := httptest.NewRequest(http.MethodGet, "/api/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for non-string user_id, got %d", w.Code)
 	}
 }
 

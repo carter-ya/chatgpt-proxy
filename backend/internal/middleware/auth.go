@@ -42,6 +42,10 @@ func AuthMiddleware(jwtSecret string) gin.HandlerFunc {
 
 		userID, _ := claims["user_id"].(string)
 		email, _ := claims["email"].(string)
+		if userID == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "认证令牌缺少有效用户标识"})
+			return
+		}
 
 		c.Set("user_id", userID)
 		c.Set("email", email)

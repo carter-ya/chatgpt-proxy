@@ -31,6 +31,7 @@ test('生成候选图、选择候选并引用原图继续编辑', async ({ page 
 
   const generationRequests: Array<Record<string, unknown>> = [];
   let selectionRequests = 0;
+  let selectionBody: Record<string, unknown> = {};
   await page.route('**/api/conversations*', (route) =>
     route.fulfill({
       status: 200,
@@ -43,6 +44,7 @@ test('生成候选图、选择候选并引用原图继续编辑', async ({ page 
   );
   await page.route('**/api/images/select', async (route) => {
     selectionRequests += 1;
+    selectionBody = route.request().postDataJSON() as Record<string, unknown>;
     await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
   });
   await page.route('**/api/images/generations', async (route) => {
@@ -68,6 +70,7 @@ test('生成候选图、选择候选并引用原图继续编辑', async ({ page 
   await expect(page.getByRole('button', { name: '已选择', exact: true })).toBeVisible();
   await expect(page.getByText(/正在编辑/)).toHaveCount(0);
   expect(selectionRequests).toBe(1);
+  expect(selectionBody).toEqual({ conversation_id: 'conversation-1', file_id: 'file-two' });
 
   await page.locator('.generated-image-option').nth(1).click();
   await expect(page.getByText('正在编辑：file-two.png')).toBeVisible();

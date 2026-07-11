@@ -19,6 +19,13 @@ var ErrSSEAbnormalTermination = errors.New("SSE 流非正常终止：未收到 d
 // StreamSSE transparently streams SSE (Server-Sent Events) from an upstream HTTP response
 // to the gin client. It flushes each chunk immediately for real-time delivery.
 func StreamSSE(c *gin.Context, resp *http.Response) error {
+	return StreamSSEWithObserver(c, resp, nil)
+}
+
+// StreamSSEWithObserver streams SSE and invokes observer before forwarding each
+// line. An observer error stops the stream, allowing callers to fail closed when
+// ownership metadata cannot be persisted.
+func StreamSSEWithObserver(c *gin.Context, resp *http.Response, observer func(string) error) error {
 	defer resp.Body.Close()
 
 	// Set SSE response headers.
@@ -65,6 +72,14 @@ func StreamSSE(c *gin.Context, resp *http.Response) error {
 				flusher.Flush()
 				log.Printf("[SSE] 上游流读取中断 (非 EOF): %v", scanErr)
 				return fmt.Errorf("SSE 流读取错误: %w", scanErr)
+			}
+
+			if observer != nil {
+				if err := observer(line); err != nil {
+					fmt.Fprint(c.Writer, "event: error\ndata: SSE 资源归属处理失败\n\n")
+					flusher.Flush()
+					return fmt.Errorf("SSE 观察器拒绝数据: %w", err)
+				}
 			}
 
 			// Write the line to the client.

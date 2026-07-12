@@ -1,15 +1,24 @@
 import { useState, useCallback, useRef } from 'react';
-import { chat, type FileAsset, type UploadedFile } from '../api/client';
+import { chat, type FileAsset, type Source, type StreamPayload, type UploadedFile } from '../api/client';
+import { sanitizeCitations } from '../utils/format';
 
 interface SendMessageParams {
   message: string;
   model: string;
   conversationId?: string;
   genId?: string;
-  attachment?: UploadedFile;
+  attachments?: UploadedFile[];
+  thinkingEffort?: string;
+  retryAssistantMessageId?: string;
+  imageMode?: boolean;
+  imageReference?: UploadedFile;
   onConversationCreated?: (id: string) => void;
   onToken?: (token: string) => void;
   onImages?: (images: FileAsset[]) => void;
+  onStatus?: (status: string) => void;
+  onReasoning?: (reasoning: string) => void;
+  onSources?: (sources: Source[]) => void;
+  onMessageId?: (id: string) => void;
   onDone?: (fullMessage: string) => void;
   onError?: (error: Error) => void;
 }
@@ -36,15 +45,20 @@ export function useChat(): UseChatReturn {
     abortRef.current = controller;
 
     try {
-      const response = await chat.sendMessage(
-        params.message,
-        params.model,
-        params.conversationId,
-        true,
-        params.genId,
-        params.attachment,
-        controller.signal,
-      );
+      const response = params.retryAssistantMessageId && params.conversationId
+        ? await chat.retryMessage(params.conversationId, params.retryAssistantMessageId, params.model, params.thinkingEffort, controller.signal)
+        : params.imageMode
+          ? await chat.generateImage(params.message, params.model, controller.signal, params.imageReference, params.conversationId, params.attachments || [])
+          : await chat.sendMessage(
+          params.message,
+          params.model,
+          params.conversationId,
+          true,
+          params.genId,
+          params.attachments || [],
+          params.thinkingEffort,
+          controller.signal,
+        );
 
       if (controller.signal.aborted) return;
 
@@ -98,7 +112,7 @@ export function useChat(): UseChatReturn {
           }
           if (data === '[DONE]') continue;
 
-          let parsed: { conversation_id?: string; content?: string; images?: FileAsset[]; error?: string };
+          let parsed: StreamPayload;
           try {
             parsed = JSON.parse(data);
           } catch {
@@ -116,11 +130,15 @@ export function useChat(): UseChatReturn {
 
           if (parsed.content) {
             fullContent += parsed.content;
-            params.onToken?.(fullContent);
+            params.onToken?.(sanitizeCitations(fullContent));
           }
           if (parsed.images?.length) {
             params.onImages?.(parsed.images);
           }
+          if (parsed.status) params.onStatus?.(parsed.status);
+          if (parsed.reasoning) params.onReasoning?.(parsed.reasoning);
+          if (parsed.sources?.length) params.onSources?.(parsed.sources);
+          if (parsed.message_id) params.onMessageId?.(parsed.message_id);
         }
       }
 
@@ -130,7 +148,7 @@ export function useChat(): UseChatReturn {
       if (remaining.startsWith('data: ')) {
         const data = remaining.slice(6).trim();
         if (data !== '[DONE]') {
-          let parsed: { content?: string; images?: FileAsset[]; error?: string } | null = null;
+          let parsed: StreamPayload | null = null;
           try {
             parsed = JSON.parse(data);
           } catch {
@@ -141,11 +159,15 @@ export function useChat(): UseChatReturn {
           }
           if (parsed?.content) {
             fullContent += parsed.content;
-            params.onToken?.(fullContent);
+            params.onToken?.(sanitizeCitations(fullContent));
           }
           if (parsed?.images?.length) {
             params.onImages?.(parsed.images);
           }
+          if (parsed?.status) params.onStatus?.(parsed.status);
+          if (parsed?.reasoning) params.onReasoning?.(parsed.reasoning);
+          if (parsed?.sources?.length) params.onSources?.(parsed.sources);
+          if (parsed?.message_id) params.onMessageId?.(parsed.message_id);
         }
       }
 

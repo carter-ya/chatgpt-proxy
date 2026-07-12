@@ -39,12 +39,16 @@ export default defineConfig({
   plugins: [react()],
   server: {
     ...(process.env.PORT ? { port: Number(process.env.PORT) } : {}),
+    allowedHosts: ['chatgpt-proxy.theledgers.org'],
     proxy: {
       '/api': {
         target: `http://localhost:${serverPort}`,
         changeOrigin: true,
       },
     },
+  },
+  preview: {
+    allowedHosts: ['chatgpt-proxy.theledgers.org'],
   },
   build: {
     outDir: 'dist',

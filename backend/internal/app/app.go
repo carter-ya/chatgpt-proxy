@@ -70,6 +70,8 @@ func New(cfg *config.Config) (*App, error) {
 	RegisterAuthRoutes(api, authHandler)
 	protected := RegisterProtectedRoutes(api, cfg.JWTSecret)
 	protected.POST("/conversation", proxyHandler.Conversation)
+	protected.POST("/conversations/:id/retry", proxyHandler.RetryConversation)
+	protected.GET("/models", proxyHandler.Models)
 	protected.POST("/images/generations", proxyHandler.ImageGeneration)
 	protected.POST("/images/select", proxyHandler.ImageSelection)
 	protected.POST("/files", proxyHandler.UploadFile)

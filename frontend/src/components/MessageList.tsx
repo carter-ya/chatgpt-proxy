@@ -1,6 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import ChatMessage from './ChatMessage';
-import type { FileAsset } from '../api/client';
+import type { FileAsset, Source } from '../api/client';
 
 interface LocalMessage {
   id: string;
@@ -9,16 +9,26 @@ interface LocalMessage {
   images?: FileAsset[];
   attachments?: FileAsset[];
   streaming?: boolean;
+  status?: string;
+  reasoning?: string;
+  sources?: Source[];
+  durationSeconds?: number;
+  selectedImageID?: string;
 }
 
 interface MessageListProps {
   messages: LocalMessage[];
+  onRetry?: (messageID: string) => void;
+  onUseImage?: (image: FileAsset) => void;
+  editingImageID?: string;
+  onSelectImage?: (messageID: string, image: FileAsset) => void;
 }
 
-export default function MessageList({ messages }: MessageListProps) {
+export default function MessageList({ messages, onRetry, onUseImage, editingImageID, onSelectImage }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
+  const previousMessageCount = useRef(0);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -33,10 +43,12 @@ export default function MessageList({ messages }: MessageListProps) {
     return () => container.removeEventListener('scroll', onScroll);
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!userScrolledUp.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      const initialHistoryLoad = previousMessageCount.current === 0 && messages.length > 0;
+      bottomRef.current?.scrollIntoView({ behavior: initialHistoryLoad ? 'auto' : 'smooth' });
     }
+    previousMessageCount.current = messages.length;
   }, [messages]);
 
   return (
@@ -50,6 +62,15 @@ export default function MessageList({ messages }: MessageListProps) {
             images={msg.images}
             attachments={msg.attachments}
             streaming={msg.streaming}
+            status={msg.status}
+            reasoning={msg.reasoning}
+            sources={msg.sources}
+            durationSeconds={msg.durationSeconds}
+            selectedImageID={msg.selectedImageID}
+            editingImageID={editingImageID}
+            onRetry={msg.role === 'assistant' && onRetry ? () => onRetry(msg.id) : undefined}
+            onUseImage={onUseImage}
+            onSelectImage={onSelectImage ? (image) => onSelectImage(msg.id, image) : undefined}
           />
         ))}
         <div ref={bottomRef} />

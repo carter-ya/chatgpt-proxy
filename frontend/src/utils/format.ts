@@ -8,6 +8,7 @@ export function getAvatarLetter(email?: string): string {
 
 export function formatTime(dateStr: string): string {
   const date = new Date(dateStr);
+  if (!dateStr || Number.isNaN(date.getTime())) return '';
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
   const diffMins = Math.floor(diffMs / 60000);
@@ -24,6 +25,10 @@ export function formatTime(dateStr: string): string {
   const d = String(date.getDate()).padStart(2, '0');
   if (y === now.getFullYear()) return `${m}-${d}`;
   return `${y}-${m}-${d}`;
+}
+
+export function sanitizeCitations(content: string): string {
+  return content.replace(/\uE200cite\uE202[^\uE201]*\uE201/g, '[来源](#sources)');
 }
 
 export function extractImages(

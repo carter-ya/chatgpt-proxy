@@ -1,7 +1,6 @@
 import type { Conversation } from '../api/client';
 import { formatTime, getAvatarLetter } from '../utils/format';
 import { useAuth } from '../contexts/AuthContext';
-import { useNavigate } from 'react-router-dom';
 
 interface ConversationListProps {
   conversations: Conversation[];
@@ -10,6 +9,7 @@ interface ConversationListProps {
   loadError?: boolean;
   onSelect: (conv: Conversation) => void;
   onNewChat: () => void;
+  onOpenImages: () => void;
 }
 
 export default function ConversationList({
@@ -19,9 +19,9 @@ export default function ConversationList({
   loadError,
   onSelect,
   onNewChat,
+  onOpenImages,
 }: ConversationListProps) {
   const { user, logout } = useAuth();
-  const navigate = useNavigate();
 
   return (
     <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
@@ -29,7 +29,7 @@ export default function ConversationList({
         <button className="new-chat-btn" onClick={onNewChat}>
           + 新对话
         </button>
-        <button className="images-btn" onClick={() => navigate('/images')}>
+        <button className="images-btn" onClick={onOpenImages}>
           图片
         </button>
       </div>

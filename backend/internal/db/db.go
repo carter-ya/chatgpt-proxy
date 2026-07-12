@@ -42,6 +42,7 @@ type Conversation struct {
 	ID     string
 	UserID string
 	Title  string
+	Kind   string
 }
 
 type File struct {
@@ -114,16 +115,27 @@ func (q *Queries) CreateSessionToken(ctx context.Context, encryptedToken string)
 
 // CreateConversation inserts a new conversation row. Uses ON CONFLICT DO NOTHING
 // to safely handle cases where the conversation already exists.
-func (q *Queries) CreateConversation(ctx context.Context, id, userID, title string) error {
-	const sql = `INSERT INTO conversations (id, user_id, title) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`
-	_, err := q.db.Exec(ctx, sql, id, userID, title)
+func (q *Queries) CreateConversation(ctx context.Context, id, userID, title, kind string) error {
+	if kind == "" {
+		kind = "chat"
+	}
+	const sql = `INSERT INTO conversations (id, user_id, title, kind) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (id) DO UPDATE SET kind = CASE
+			WHEN conversations.user_id = EXCLUDED.user_id AND conversations.kind = 'chat' THEN EXCLUDED.kind
+			ELSE conversations.kind
+		END`
+	_, err := q.db.Exec(ctx, sql, id, userID, title, kind)
 	return err
 }
 
 // BindConversation creates an ownership mapping and verifies that an existing
 // mapping belongs to the same user. It never transfers ownership.
-func (q *Queries) BindConversation(ctx context.Context, id, userID, title string) (bool, error) {
-	if err := q.CreateConversation(ctx, id, userID, title); err != nil {
+func (q *Queries) BindConversation(ctx context.Context, id, userID, title string, kind ...string) (bool, error) {
+	conversationKind := "chat"
+	if len(kind) > 0 && kind[0] != "" {
+		conversationKind = kind[0]
+	}
+	if err := q.CreateConversation(ctx, id, userID, title, conversationKind); err != nil {
 		return false, err
 	}
 	conversation, err := q.GetConversationByID(ctx, id)
@@ -136,9 +148,9 @@ func (q *Queries) BindConversation(ctx context.Context, id, userID, title string
 // GetConversationByID returns a conversation by its id.
 // Returns a zero-value Conversation and an error (pgx.ErrNoRows) if not found.
 func (q *Queries) GetConversationByID(ctx context.Context, id string) (Conversation, error) {
-	const sql = `SELECT id, user_id, title FROM conversations WHERE id = $1`
+	const sql = `SELECT id, user_id, title, kind FROM conversations WHERE id = $1`
 	var c Conversation
-	err := q.db.QueryRow(ctx, sql, id).Scan(&c.ID, &c.UserID, &c.Title)
+	err := q.db.QueryRow(ctx, sql, id).Scan(&c.ID, &c.UserID, &c.Title, &c.Kind)
 	return c, err
 }
 
@@ -163,6 +175,24 @@ func (q *Queries) ListConversationIDsByUser(ctx context.Context, userID string) 
 		return nil, err
 	}
 	return ids, nil
+}
+
+func (q *Queries) ListConversationsByUser(ctx context.Context, userID string) ([]Conversation, error) {
+	const sql = `SELECT id, user_id, title, kind FROM conversations WHERE user_id = $1`
+	rows, err := q.db.Query(ctx, sql, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var conversations []Conversation
+	for rows.Next() {
+		var conversation Conversation
+		if err := rows.Scan(&conversation.ID, &conversation.UserID, &conversation.Title, &conversation.Kind); err != nil {
+			return nil, err
+		}
+		conversations = append(conversations, conversation)
+	}
+	return conversations, rows.Err()
 }
 
 func (q *Queries) CreateFile(ctx context.Context, id, userID, fileName, generationID string) error {

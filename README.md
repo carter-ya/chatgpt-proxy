@@ -35,6 +35,10 @@ openssl rand -base64 32
 
 项目的 `/images` 页面对应 ChatGPT 独立 Images 工作区，使用 `picture_v2` 图片模式和异步状态轮询，不等同于普通聊天中输入“生成图片”。
 
+聊天输入框会从当前 sidecar 登录账号动态读取可用模型与思考档位，并支持点击、拖放或粘贴多个文件（单文件上限 50MB）。图片会在发送前显示预览；其他格式交由 ChatGPT 的上传能力判断。
+
+普通聊天和图片工作区都会展示上游提供的思考进度、折叠后的思考摘要与搜索来源。图片工作区采用完整聊天时间线：每轮生成结果都会追加保留，候选选择与引用编辑是两个独立操作。
+
 ### 多用户资源隔离
 
 sidecar 的上游 ChatGPT 账号是共享的，但本地 API 会按 JWT 中的 `user_id`
@@ -108,6 +112,15 @@ go run ./backend/cmd/server
 ```sh
 cd frontend
 npm run dev
+```
+
+如果通过反向代理域名或移动设备进行稳定验收，请使用生产构建预览，避免 Vite
+开发热更新在保存文件时触发页面重新渲染：
+
+```sh
+cd frontend
+npm run build
+npm run preview -- --host 127.0.0.1 --port 4173
 ```
 
 访问 Vite 输出的本地地址，注册或登录本应用账号后即可使用。

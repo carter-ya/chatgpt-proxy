@@ -50,13 +50,25 @@ export interface Conversation {
   model: string;
   created_at: string;
   updated_at: string;
+  kind?: 'chat' | 'image';
+}
+
+export interface Source {
+  id: string;
+  title: string;
+  url: string;
+  domain?: string;
 }
 
 export interface Message {
+  id: string;
+  parent_id?: string;
   role: 'user' | 'assistant';
   content: string;
   images?: FileAsset[];
   attachments?: FileAsset[];
+  reasoning?: string;
+  sources?: Source[];
 }
 
 export interface FileAsset {
@@ -69,9 +81,31 @@ export interface FileAsset {
   url?: string;
   download_url: string;
   generation_id?: string;
+  message_id?: string;
+  candidate_group_message_id?: string;
 }
 
 export type UploadedFile = FileAsset;
+
+const fileBlobCache = new Map<string, Promise<Blob>>();
+
+export interface ModelOption {
+  label: string;
+  model: string;
+  thinking_effort?: string;
+  lane?: string;
+}
+
+export interface StreamPayload {
+  conversation_id?: string;
+  message_id?: string;
+  content?: string;
+  images?: FileAsset[];
+  status?: string;
+  reasoning?: string;
+  sources?: Source[];
+  error?: string;
+}
 
 export const auth = {
   register: (email: string, password: string) =>
@@ -87,7 +121,8 @@ export const chat = {
     conversationId?: string,
     stream = true,
     genId?: string,
-    attachment?: UploadedFile,
+    attachments: UploadedFile[] = [],
+    thinkingEffort?: string,
     signal?: AbortSignal,
   ) => {
     return fetch(`${API_BASE}/conversation`, {
@@ -100,8 +135,8 @@ export const chat = {
         conversation_id: conversationId,
         stream,
         gen_id: genId,
-        attachment_file_id: attachment?.file_id,
-        attachment,
+        attachments,
+        thinking_effort: thinkingEffort,
       }),
     });
   },
@@ -110,25 +145,46 @@ export const chat = {
     prompt: string,
     model = 'gpt-5-6-thinking',
     signal?: AbortSignal,
-    attachment?: UploadedFile,
+    reference?: UploadedFile,
     conversationId?: string,
+    attachments: UploadedFile[] = [],
   ) => {
     return fetch(`${API_BASE}/images/generations`, {
       method: 'POST',
       headers: getAuthHeaders(),
       signal,
-      body: JSON.stringify({ prompt, model, attachment, conversation_id: conversationId, original_gen_id: attachment?.generation_id, original_file_id: attachment?.file_id }),
+      body: JSON.stringify({ prompt, model, attachment: reference, attachments, conversation_id: conversationId, original_gen_id: reference?.generation_id, original_file_id: reference?.file_id }),
     });
   },
 
-  selectImage: async (conversationId: string, fileId: string) => {
+  selectImage: async (conversationId: string, image: FileAsset) => {
     const response = await fetch(`${API_BASE}/images/select`, {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ conversation_id: conversationId, file_id: fileId }),
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        file_id: image.file_id,
+        message_id: image.candidate_group_message_id,
+        selected_image_message_id: image.message_id,
+      }),
     });
-    if (!response.ok) throw new Error(`候选图片反馈失败: HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`候选图片反馈失败: HTTP ${response.status} ${await response.text()}`);
   },
+
+  getModels: () => apiClient.get<{ default_model: string; options: ModelOption[] }>('/models'),
+
+  retryMessage: (
+    conversationId: string,
+    assistantMessageId: string,
+    model: string,
+    thinkingEffort: string | undefined,
+    signal?: AbortSignal,
+  ) => fetch(`${API_BASE}/conversations/${conversationId}/retry`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    signal,
+    body: JSON.stringify({ assistant_message_id: assistantMessageId, model, thinking_effort: thinkingEffort }),
+  }),
 
   uploadFile: async (file: File): Promise<UploadedFile> => {
     const formData = new FormData();
@@ -139,13 +195,20 @@ export const chat = {
 
   getFileBlob: async (file: Pick<FileAsset, 'download_url'>): Promise<Blob> => {
     const token = localStorage.getItem('token');
+    const cacheKey = `${token || ''}:${file.download_url}`;
+    const cached = fileBlobCache.get(cacheKey);
+    if (cached) return cached;
     const headers: Record<string, string> = {};
     if (token) headers.Authorization = `Bearer ${token}`;
-    const response = await fetch(file.download_url, { headers });
-    if (!response.ok) {
-      throw new Error(`文件下载失败: HTTP ${response.status}`);
-    }
-    return response.blob();
+    const request = fetch(file.download_url, { headers }).then((response) => {
+      if (!response.ok) throw new Error(`文件下载失败: HTTP ${response.status}`);
+      return response.blob();
+    }).catch((error) => {
+      fileBlobCache.delete(cacheKey);
+      throw error;
+    });
+    fileBlobCache.set(cacheKey, request);
+    return request;
   },
 
   downloadFile: async (file: Pick<FileAsset, 'download_url' | 'file_name'>) => {

@@ -4,7 +4,7 @@ import { chat, type Conversation } from '../api/client';
 import ConversationList from './ConversationList';
 
 function extractConversationId(pathname: string): string | undefined {
-  const match = pathname.match(/^\/chat\/([^/]+)/);
+	const match = pathname.match(/^\/(?:chat|images)\/([^/]+)/);
   return match ? match[1] : undefined;
 }
 
@@ -43,7 +43,7 @@ export default function Layout() {
   const handleSelectConversation = useCallback(
     (conv: Conversation) => {
       setSidebarOpen(false);
-      navigate(`/chat/${conv.id}`, { replace: true });
+      navigate(`/${conv.kind === 'image' ? 'images' : 'chat'}/${conv.id}`, { replace: true });
     },
     [navigate],
   );
@@ -51,6 +51,11 @@ export default function Layout() {
   const handleNewChat = useCallback(() => {
     setSidebarOpen(false);
     navigate('/chat', { replace: true });
+  }, [navigate]);
+
+  const handleOpenImages = useCallback(() => {
+    setSidebarOpen(false);
+    navigate('/images', { replace: true });
   }, [navigate]);
 
   return (
@@ -75,6 +80,7 @@ export default function Layout() {
         loadError={loadError}
         onSelect={handleSelectConversation}
         onNewChat={handleNewChat}
+        onOpenImages={handleOpenImages}
       />
 
       <Outlet context={{ loadConversations }} />

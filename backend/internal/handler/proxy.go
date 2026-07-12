@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -47,17 +48,21 @@ func NewProxyHandler(client proxy.ProxyClient, sessionManager *session.Manager, 
 
 // conversationRequest is the expected JSON body for POST /api/conversation.
 type conversationRequest struct {
-	Message          string             `json:"message"`
-	Model            string             `json:"model"`
-	ConversationID   string             `json:"conversation_id"`
-	Stream           bool               `json:"stream"`
-	GenID            string             `json:"gen_id"`
-	AttachmentFileID string             `json:"attachment_file_id"`
-	Attachment       *attachmentRequest `json:"attachment"`
-	OriginalGenID    string             `json:"original_gen_id"`
-	OriginalFileID   string             `json:"original_file_id"`
-	WebSearch        bool               `json:"web_search"`
-	ImageMode        bool               `json:"-"`
+	Message          string              `json:"message"`
+	Model            string              `json:"model"`
+	ConversationID   string              `json:"conversation_id"`
+	Stream           bool                `json:"stream"`
+	GenID            string              `json:"gen_id"`
+	AttachmentFileID string              `json:"attachment_file_id"`
+	Attachment       *attachmentRequest  `json:"attachment"`
+	Attachments      []attachmentRequest `json:"attachments"`
+	OriginalGenID    string              `json:"original_gen_id"`
+	OriginalFileID   string              `json:"original_file_id"`
+	ThinkingEffort   string              `json:"thinking_effort"`
+	WebSearch        bool                `json:"web_search"`
+	ImageMode        bool                `json:"-"`
+	Action           string              `json:"-"`
+	ParentMessageID  string              `json:"-"`
 }
 
 type attachmentRequest struct {
@@ -83,21 +88,104 @@ type upstreamFileDownloadResponse struct {
 }
 
 type apiFileAsset struct {
-	FileID       string `json:"file_id"`
-	FileName     string `json:"file_name"`
-	MIMEType     string `json:"mime_type"`
-	SizeBytes    int64  `json:"size_bytes"`
-	Width        int    `json:"width"`
-	Height       int    `json:"height"`
-	DownloadURL  string `json:"download_url"`
-	GenerationID string `json:"generation_id,omitempty"`
+	FileID                  string `json:"file_id"`
+	FileName                string `json:"file_name"`
+	MIMEType                string `json:"mime_type"`
+	SizeBytes               int64  `json:"size_bytes"`
+	Width                   int    `json:"width"`
+	Height                  int    `json:"height"`
+	DownloadURL             string `json:"download_url"`
+	GenerationID            string `json:"generation_id,omitempty"`
+	MessageID               string `json:"message_id,omitempty"`
+	CandidateGroupMessageID string `json:"candidate_group_message_id,omitempty"`
 }
 
 type apiMessage struct {
+	ID          string         `json:"id"`
+	ParentID    string         `json:"parent_id,omitempty"`
 	Role        string         `json:"role"`
 	Content     string         `json:"content"`
 	Images      []apiFileAsset `json:"images,omitempty"`
 	Attachments []apiFileAsset `json:"attachments,omitempty"`
+	Reasoning   string         `json:"reasoning,omitempty"`
+	Sources     []apiSource    `json:"sources,omitempty"`
+}
+
+type apiSource struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	URL    string `json:"url"`
+	Domain string `json:"domain,omitempty"`
+}
+
+type apiModelOption struct {
+	Label          string `json:"label"`
+	Model          string `json:"model"`
+	ThinkingEffort string `json:"thinking_effort,omitempty"`
+	Lane           string `json:"lane,omitempty"`
+}
+
+// Models returns the models and thinking presets available to the logged-in
+// ChatGPT browser account.
+func (h *ProxyHandler) Models(c *gin.Context) {
+	req, err := h.client.BuildRequest(c.Request.Context(), http.MethodGet, "/backend-api/models", "", nil, "application/json")
+	if err != nil {
+		httpresp.Error(c, http.StatusInternalServerError, "构建模型目录请求失败")
+		return
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, "读取模型目录失败")
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		writeProxyError(c, resp.StatusCode, body, "读取模型目录失败")
+		return
+	}
+	var raw struct {
+		DefaultModel string `json:"default_model_slug"`
+		Versions     []struct {
+			ID      string `json:"id"`
+			Enabled bool   `json:"enabled"`
+			Presets []struct {
+				Label          string `json:"selected_display_title"`
+				Title          string `json:"title"`
+				Model          string `json:"model_slug"`
+				ThinkingEffort string `json:"thinking_effort"`
+				Lane           string `json:"lane"`
+				PresetType     string `json:"preset_type"`
+			} `json:"intelligence_presets"`
+		} `json:"versions"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		httpresp.Error(c, http.StatusBadGateway, "解析模型目录失败")
+		return
+	}
+	options := make([]apiModelOption, 0)
+	seen := map[string]bool{}
+	for _, version := range raw.Versions {
+		if !version.Enabled || (version.ID != "latest" && len(options) > 0) {
+			continue
+		}
+		for _, preset := range version.Presets {
+			if preset.PresetType != "available" || preset.Model == "" {
+				continue
+			}
+			key := preset.Model + ":" + preset.ThinkingEffort
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			label := preset.Label
+			if label == "" {
+				label = preset.Title
+			}
+			options = append(options, apiModelOption{Label: label, Model: preset.Model, ThinkingEffort: preset.ThinkingEffort, Lane: preset.Lane})
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"default_model": raw.DefaultModel, "options": options})
 }
 
 // Conversation handles POST /api/conversation.
@@ -117,17 +205,76 @@ func (h *ProxyHandler) Conversation(c *gin.Context) {
 	h.proxyConversation(c, reqBody)
 }
 
+// RetryConversation regenerates the selected assistant response as an
+// upstream variant while keeping the visible conversation branch stable.
+func (h *ProxyHandler) RetryConversation(c *gin.Context) {
+	conversationID := c.Param("id")
+	var retry struct {
+		AssistantMessageID string `json:"assistant_message_id"`
+		Model              string `json:"model"`
+		ThinkingEffort     string `json:"thinking_effort"`
+	}
+	if err := c.ShouldBindJSON(&retry); err != nil || retry.AssistantMessageID == "" {
+		httpresp.Error(c, http.StatusBadRequest, "重试缺少回答标识")
+		return
+	}
+	userID, ok := authenticatedUserID(c)
+	if !ok || !h.requireConversationOwner(c, conversationID, userID) {
+		return
+	}
+	req, err := h.client.BuildRequest(c.Request.Context(), http.MethodGet, "/backend-api/conversation/"+url.PathEscape(conversationID), "", nil, "application/json")
+	if err != nil {
+		httpresp.Error(c, http.StatusInternalServerError, "构建重试上下文失败")
+		return
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, "读取重试上下文失败")
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	normalized, err := normalizeConversationDetail(body, conversationID)
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, "解析重试上下文失败")
+		return
+	}
+	messages, _ := normalized["messages"].([]apiMessage)
+	var userMessage *apiMessage
+	for index := range messages {
+		if messages[index].ID == retry.AssistantMessageID {
+			for previous := index - 1; previous >= 0; previous-- {
+				if messages[previous].Role == "user" {
+					userMessage = &messages[previous]
+					break
+				}
+			}
+			break
+		}
+	}
+	if userMessage == nil {
+		httpresp.Error(c, http.StatusNotFound, "找不到待重试的原始消息")
+		return
+	}
+	attachments := make([]attachmentRequest, 0, len(userMessage.Attachments))
+	for _, asset := range userMessage.Attachments {
+		attachments = append(attachments, attachmentRequest{FileID: asset.FileID, FileName: asset.FileName, MIMEType: asset.MIMEType, SizeBytes: asset.SizeBytes, Width: asset.Width, Height: asset.Height})
+	}
+	h.proxyConversation(c, conversationRequest{Message: userMessage.Content, Model: retry.Model, ThinkingEffort: retry.ThinkingEffort, ConversationID: conversationID, Stream: true, Attachments: attachments, Action: "variant", ParentMessageID: userMessage.ID})
+}
+
 // ImageGeneration handles the independent ChatGPT Images workflow. It uses
 // the same upstream conversation transport with the picture_v2 hint that the
 // official /images page sends.
 func (h *ProxyHandler) ImageGeneration(c *gin.Context) {
 	var req struct {
-		Prompt         string             `json:"prompt"`
-		Model          string             `json:"model"`
-		Attachment     *attachmentRequest `json:"attachment"`
-		ConversationID string             `json:"conversation_id"`
-		OriginalGenID  string             `json:"original_gen_id"`
-		OriginalFileID string             `json:"original_file_id"`
+		Prompt         string              `json:"prompt"`
+		Model          string              `json:"model"`
+		Attachment     *attachmentRequest  `json:"attachment"`
+		Attachments    []attachmentRequest `json:"attachments"`
+		ConversationID string              `json:"conversation_id"`
+		OriginalGenID  string              `json:"original_gen_id"`
+		OriginalFileID string              `json:"original_file_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Prompt) == "" {
 		httpresp.Error(c, http.StatusBadRequest, "图片提示词不能为空")
@@ -139,6 +286,7 @@ func (h *ProxyHandler) ImageGeneration(c *gin.Context) {
 		Stream:         true,
 		ImageMode:      true,
 		Attachment:     req.Attachment,
+		Attachments:    req.Attachments,
 		ConversationID: req.ConversationID,
 		OriginalGenID:  req.OriginalGenID,
 		OriginalFileID: req.OriginalFileID,
@@ -148,10 +296,12 @@ func (h *ProxyHandler) ImageGeneration(c *gin.Context) {
 // ImageSelection forwards the Images workspace candidate-selection signal.
 func (h *ProxyHandler) ImageSelection(c *gin.Context) {
 	var selection struct {
-		ConversationID string `json:"conversation_id"`
-		FileID         string `json:"file_id"`
+		ConversationID         string `json:"conversation_id"`
+		FileID                 string `json:"file_id"`
+		MessageID              string `json:"message_id"`
+		SelectedImageMessageID string `json:"selected_image_message_id"`
 	}
-	if err := c.ShouldBindJSON(&selection); err != nil || selection.ConversationID == "" || selection.FileID == "" {
+	if err := c.ShouldBindJSON(&selection); err != nil || selection.ConversationID == "" || selection.FileID == "" || selection.MessageID == "" || selection.SelectedImageMessageID == "" {
 		httpresp.Error(c, http.StatusBadRequest, "候选图片缺少对话或文件标识")
 		return
 	}
@@ -165,7 +315,12 @@ func (h *ProxyHandler) ImageSelection(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
-	req, err := h.client.BuildRequest(ctx, http.MethodPost, "/backend-api/image-gen/message-select", "", bytes.NewReader([]byte(`{}`)), "application/json")
+	payload, _ := json.Marshal(map[string]string{
+		"conversation_id":           selection.ConversationID,
+		"message_id":                selection.MessageID,
+		"selected_image_message_id": selection.SelectedImageMessageID,
+	})
+	req, err := h.client.BuildRequest(ctx, http.MethodPost, "/backend-api/image-gen/message-select", "", bytes.NewReader(payload), "application/json")
 	if err != nil {
 		httpresp.Error(c, http.StatusInternalServerError, err.Error())
 		return
@@ -199,6 +354,11 @@ func (h *ProxyHandler) proxyConversation(c *gin.Context, reqBody conversationReq
 	}
 	if reqBody.Attachment != nil && reqBody.Attachment.FileID != "" {
 		fileIDs[reqBody.Attachment.FileID] = struct{}{}
+	}
+	for _, attachment := range reqBody.Attachments {
+		if attachment.FileID != "" {
+			fileIDs[attachment.FileID] = struct{}{}
+		}
 	}
 	if reqBody.AttachmentFileID != "" {
 		fileIDs[reqBody.AttachmentFileID] = struct{}{}
@@ -254,7 +414,7 @@ func (h *ProxyHandler) proxyConversation(c *gin.Context, reqBody conversationReq
 		return
 	}
 	observer := func(line string) error {
-		return h.bindResourcesFromSSE(ctx, userID, line)
+		return h.bindResourcesFromSSE(ctx, userID, line, reqBody.ImageMode)
 	}
 	if err := proxy.StreamSSEWithObserver(c, resp, observer); err != nil {
 		// SSE streaming errors are logged but the response may already be partially sent.
@@ -277,26 +437,43 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 		thinkingEffort = "standard"
 	}
 
-	attachment := reqBody.Attachment
-	if attachment == nil && reqBody.AttachmentFileID != "" {
-		attachment = &attachmentRequest{
+	attachments := append([]attachmentRequest{}, reqBody.Attachments...)
+	if reqBody.Attachment != nil {
+		attachments = append(attachments, *reqBody.Attachment)
+	}
+	if len(attachments) == 0 && reqBody.AttachmentFileID != "" {
+		attachments = append(attachments, attachmentRequest{
 			FileID:   reqBody.AttachmentFileID,
 			FileName: reqBody.AttachmentFileID,
 			MIMEType: "image/png",
-		}
+		})
 	}
 
 	// Build the user message with ChatGPT's attachment metadata.
 	var userMessage map[string]interface{}
-	if attachment != nil && attachment.FileID != "" {
-		attachmentMetadata := map[string]interface{}{
-			"id":       attachment.FileID,
-			"name":     attachment.FileName,
-			"mimeType": attachment.MIMEType,
-			"size":     attachment.SizeBytes,
+	if len(attachments) > 0 {
+		attachmentMetadata := make([]interface{}, 0, len(attachments))
+		contentParts := make([]interface{}, 0, len(attachments)+1)
+		for _, attachment := range attachments {
+			if attachment.FileID == "" {
+				continue
+			}
+			metadata := map[string]interface{}{
+				"id": attachment.FileID, "name": attachment.FileName,
+				"mimeType": attachment.MIMEType, "size": attachment.SizeBytes,
+			}
+			if strings.HasPrefix(attachment.MIMEType, "image/") {
+				metadata["width"] = attachment.Width
+				metadata["height"] = attachment.Height
+				contentParts = append(contentParts, map[string]interface{}{
+					"content_type": "image_asset_pointer", "asset_pointer": "file-service://" + attachment.FileID,
+					"size_bytes": attachment.SizeBytes, "width": attachment.Width, "height": attachment.Height,
+				})
+			}
+			attachmentMetadata = append(attachmentMetadata, metadata)
 		}
 		messageMetadata := map[string]interface{}{
-			"attachments":      []interface{}{attachmentMetadata},
+			"attachments":      attachmentMetadata,
 			"selected_sources": []interface{}{},
 			"serialization_metadata": map[string]interface{}{
 				"custom_symbol_offsets": []interface{}{},
@@ -310,21 +487,11 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 			"content_type": "text",
 			"parts":        []string{reqBody.Message},
 		}
-		if strings.HasPrefix(attachment.MIMEType, "image/") {
-			attachmentMetadata["width"] = attachment.Width
-			attachmentMetadata["height"] = attachment.Height
+		if len(contentParts) > 0 {
+			contentParts = append(contentParts, reqBody.Message)
 			content = map[string]interface{}{
 				"content_type": "multimodal_text",
-				"parts": []interface{}{
-					map[string]interface{}{
-						"content_type":  "image_asset_pointer",
-						"asset_pointer": "file-service://" + attachment.FileID,
-						"size_bytes":    attachment.SizeBytes,
-						"width":         attachment.Width,
-						"height":        attachment.Height,
-					},
-					reqBody.Message,
-				},
+				"parts":        contentParts,
 			}
 		}
 
@@ -373,8 +540,12 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 	}
 
 	// Build the upstream request body matching chatgpt.com's current /backend-api/f/conversation format.
+	action := reqBody.Action
+	if action == "" {
+		action = "next"
+	}
 	upstreamBody := map[string]interface{}{
-		"action":               "next",
+		"action":               action,
 		"messages":             []map[string]interface{}{userMessage},
 		"model":                model,
 		"parent_message_id":    "client-created-root",
@@ -403,12 +574,19 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 			"web_push_notification_permission": "default",
 		},
 	}
-	if model == "gpt-5-6-thinking" {
+	if reqBody.ThinkingEffort != "" {
+		thinkingEffort = reqBody.ThinkingEffort
+	}
+	if strings.Contains(model, "thinking") {
 		upstreamBody["thinking_effort"] = thinkingEffort
 	}
 	if reqBody.ConversationID != "" {
 		upstreamBody["conversation_id"] = reqBody.ConversationID
-		upstreamBody["parent_message_id"] = uuid.New().String()
+		if reqBody.ParentMessageID != "" {
+			upstreamBody["parent_message_id"] = reqBody.ParentMessageID
+		} else {
+			upstreamBody["parent_message_id"] = uuid.New().String()
+		}
 	}
 	if reqBody.GenID != "" {
 		upstreamBody["gen_id"] = reqBody.GenID
@@ -819,7 +997,29 @@ func normalizeConversationDetail(body []byte, conversationID string) (gin.H, err
 
 	messages := make([]apiMessage, 0, len(orderedNodes))
 	seenImages := make(map[string]bool)
+	groupMessageByFile := make(map[string]string)
+	selectedMessageByFile := make(map[string]string)
+	for _, node := range orderedNodes {
+		message, _ := node["message"].(map[string]interface{})
+		if message == nil {
+			continue
+		}
+		messageID, _ := message["id"].(string)
+		content, _ := message["content"].(map[string]interface{})
+		parts, _ := content["parts"].([]interface{})
+		fileIDs := generatedFileIDs(parts)
+		for _, fileID := range fileIDs {
+			if len(fileIDs) > 1 {
+				groupMessageByFile[fileID] = messageID
+			}
+			if len(fileIDs) == 1 {
+				selectedMessageByFile[fileID] = messageID
+			}
+		}
+	}
 	model := ""
+	pendingReasoning := ""
+	pendingSources := make([]apiSource, 0)
 	for _, node := range orderedNodes {
 		message, _ := node["message"].(map[string]interface{})
 		if message == nil {
@@ -830,6 +1030,8 @@ func normalizeConversationDetail(body []byte, conversationID string) (gin.H, err
 		content, _ := message["content"].(map[string]interface{})
 		contentType, _ := content["content_type"].(string)
 		metadata, _ := message["metadata"].(map[string]interface{})
+		messageID, _ := message["id"].(string)
+		parentID, _ := node["parent"].(string)
 		if model == "" {
 			model, _ = metadata["resolved_model_slug"].(string)
 		}
@@ -841,24 +1043,41 @@ func normalizeConversationDetail(body []byte, conversationID string) (gin.H, err
 				textParts = append(textParts, text)
 			}
 		}
+		pendingSources = mergeSources(pendingSources, sourcesFromMetadata(metadata))
 
 		switch {
 		case role == "user":
+			pendingReasoning = ""
+			pendingSources = nil
 			attachments := assetsFromMetadata(metadata)
 			messages = append(messages, apiMessage{
+				ID:          messageID,
+				ParentID:    parentID,
 				Role:        "user",
 				Content:     strings.Join(textParts, "\n"),
 				Attachments: attachments,
 			})
-		case role == "assistant" && contentType == "text" && metadata["is_thinking_preamble_message"] != true:
+		case role == "assistant" && (contentType == "thoughts" || contentType == "reasoning_recap" || metadata["is_thinking_preamble_message"] == true):
+			text := strings.TrimSpace(strings.Join(textParts, "\n"))
+			if text != "" {
+				if pendingReasoning != "" {
+					pendingReasoning += "\n"
+				}
+				pendingReasoning += text
+			}
+		case role == "assistant" && contentType == "text":
 			text := strings.Join(textParts, "\n")
 			if text != "" {
-				messages = append(messages, apiMessage{Role: "assistant", Content: text})
+				messages = append(messages, apiMessage{ID: messageID, ParentID: parentID, Role: "assistant", Content: sanitizeCitations(text), Reasoning: pendingReasoning, Sources: pendingSources})
+				pendingReasoning = ""
+				pendingSources = nil
 			}
 		case contentType == "multimodal_text" && role != "user":
-			images := generatedAssetsFromParts(parts, seenImages)
+			images := generatedAssetsFromParts(parts, seenImages, groupMessageByFile, selectedMessageByFile)
 			if len(images) > 0 {
-				messages = append(messages, apiMessage{Role: "assistant", Content: "", Images: images})
+				messages = append(messages, apiMessage{ID: messageID, ParentID: parentID, Role: "assistant", Content: "", Images: images, Reasoning: pendingReasoning, Sources: pendingSources})
+				pendingReasoning = ""
+				pendingSources = nil
 			}
 		}
 	}
@@ -869,8 +1088,8 @@ func normalizeConversationDetail(body []byte, conversationID string) (gin.H, err
 			"id":         conversationID,
 			"title":      title,
 			"model":      model,
-			"created_at": raw["create_time"],
-			"updated_at": raw["update_time"],
+			"created_at": normalizeTimestamp(raw["create_time"]),
+			"updated_at": normalizeTimestamp(raw["update_time"]),
 		},
 		"messages": messages,
 	}, nil
@@ -900,7 +1119,27 @@ func assetsFromMetadata(metadata map[string]interface{}) []apiFileAsset {
 	return assets
 }
 
-func generatedAssetsFromParts(parts []interface{}, seen map[string]bool) []apiFileAsset {
+func generatedFileIDs(parts []interface{}) []string {
+	ids := make([]string, 0)
+	for _, rawPart := range parts {
+		part, _ := rawPart.(map[string]interface{})
+		if part == nil || part["content_type"] != "image_asset_pointer" {
+			continue
+		}
+		metadata, _ := part["metadata"].(map[string]interface{})
+		if metadata["generation"] == nil && metadata["dalle"] == nil {
+			continue
+		}
+		pointer, _ := part["asset_pointer"].(string)
+		id := strings.TrimPrefix(strings.TrimPrefix(pointer, "sediment://"), "file-service://")
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func generatedAssetsFromParts(parts []interface{}, seen map[string]bool, groupMessages, selectedMessages map[string]string) []apiFileAsset {
 	assets := make([]apiFileAsset, 0)
 	for _, rawPart := range parts {
 		part, _ := rawPart.(map[string]interface{})
@@ -931,17 +1170,75 @@ func generatedAssetsFromParts(parts []interface{}, seen map[string]bool) []apiFi
 			}
 		}
 		assets = append(assets, apiFileAsset{
-			FileID:       fileID,
-			FileName:     fileID + ".png",
-			MIMEType:     mimeType,
-			SizeBytes:    int64(numberValue(part["size_bytes"])),
-			Width:        int(numberValue(part["width"])),
-			Height:       int(numberValue(part["height"])),
-			DownloadURL:  "/api/files/" + url.PathEscape(fileID) + "/download",
-			GenerationID: generationID,
+			FileID:                  fileID,
+			FileName:                fileID + ".png",
+			MIMEType:                mimeType,
+			SizeBytes:               int64(numberValue(part["size_bytes"])),
+			Width:                   int(numberValue(part["width"])),
+			Height:                  int(numberValue(part["height"])),
+			DownloadURL:             "/api/files/" + url.PathEscape(fileID) + "/download",
+			GenerationID:            generationID,
+			MessageID:               selectedMessages[fileID],
+			CandidateGroupMessageID: groupMessages[fileID],
 		})
 	}
 	return assets
+}
+
+var citationTokenPattern = regexp.MustCompile(`cite[^]*`)
+
+func sanitizeCitations(content string) string {
+	return citationTokenPattern.ReplaceAllString(content, "[来源](#sources)")
+}
+
+func normalizeTimestamp(value interface{}) string {
+	seconds := numberValue(value)
+	if seconds <= 0 {
+		return ""
+	}
+	whole := int64(seconds)
+	nanos := int64((seconds - float64(whole)) * float64(time.Second))
+	return time.Unix(whole, nanos).UTC().Format(time.RFC3339Nano)
+}
+
+func sourcesFromMetadata(metadata map[string]interface{}) []apiSource {
+	groups, _ := metadata["search_result_groups"].([]interface{})
+	result := make([]apiSource, 0)
+	seen := map[string]bool{}
+	for _, rawGroup := range groups {
+		group, _ := rawGroup.(map[string]interface{})
+		domain, _ := group["domain"].(string)
+		entries, _ := group["entries"].([]interface{})
+		for _, rawEntry := range entries {
+			entry, _ := rawEntry.(map[string]interface{})
+			link, _ := entry["url"].(string)
+			if link == "" || seen[link] {
+				continue
+			}
+			seen[link] = true
+			title, _ := entry["title"].(string)
+			id := fmt.Sprintf("source-%d", len(result)+1)
+			result = append(result, apiSource{ID: id, Title: title, URL: link, Domain: domain})
+			if len(result) >= 12 {
+				return result
+			}
+		}
+	}
+	return result
+}
+
+func mergeSources(existing, incoming []apiSource) []apiSource {
+	seen := map[string]bool{}
+	for _, source := range existing {
+		seen[source.URL] = true
+	}
+	for _, source := range incoming {
+		if !seen[source.URL] {
+			existing = append(existing, source)
+			seen[source.URL] = true
+		}
+	}
+	return existing
 }
 
 func numberValue(value interface{}) float64 {
@@ -1023,7 +1320,7 @@ func (h *ProxyHandler) requireImageSource(c *gin.Context, fileID, generationID, 
 	return true
 }
 
-func (h *ProxyHandler) bindResourcesFromSSE(ctx context.Context, userID, line string) error {
+func (h *ProxyHandler) bindResourcesFromSSE(ctx context.Context, userID, line string, imageMode ...bool) error {
 	if !strings.HasPrefix(line, "data:") {
 		return nil
 	}
@@ -1039,7 +1336,11 @@ func (h *ProxyHandler) bindResourcesFromSSE(ctx context.Context, userID, line st
 		return nil
 	}
 	if payload.ConversationID != "" {
-		owned, err := h.queries.BindConversation(ctx, payload.ConversationID, userID, "")
+		kind := "chat"
+		if len(imageMode) > 0 && imageMode[0] {
+			kind = "image"
+		}
+		owned, err := h.queries.BindConversation(ctx, payload.ConversationID, userID, "", kind)
 		if err != nil {
 			return fmt.Errorf("保存对话归属: %w", err)
 		}
@@ -1102,13 +1403,13 @@ func (h *ProxyHandler) filterConversationsByOwner(ctx context.Context, body []by
 	}
 
 	// Build a set of conversation IDs owned by the current user.
-	ownedIDs, err := h.queries.ListConversationIDsByUser(ctx, userID)
+	ownedConversations, err := h.queries.ListConversationsByUser(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("查询用户对话失败: %w", err)
 	}
-	ownedSet := make(map[string]bool, len(ownedIDs))
-	for _, id := range ownedIDs {
-		ownedSet[id] = true
+	ownedKinds := make(map[string]string, len(ownedConversations))
+	for _, conversation := range ownedConversations {
+		ownedKinds[conversation.ID] = conversation.Kind
 	}
 
 	// Filter items to only owned conversations.
@@ -1119,7 +1420,13 @@ func (h *ProxyHandler) filterConversationsByOwner(ctx context.Context, body []by
 			continue
 		}
 		id, _ := obj["id"].(string)
-		if ownedSet[id] {
+		if kind, owned := ownedKinds[id]; owned {
+			obj["created_at"] = normalizeTimestamp(obj["create_time"])
+			obj["updated_at"] = normalizeTimestamp(obj["update_time"])
+			if kind == "" {
+				kind = "chat"
+			}
+			obj["kind"] = kind
 			filtered = append(filtered, item)
 		}
 	}

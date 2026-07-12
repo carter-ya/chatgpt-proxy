@@ -26,6 +26,7 @@ function App() {
             <Route path="chat" element={<ChatPage />} />
             <Route path="chat/:conversationId" element={<ChatPage />} />
             <Route path="images" element={<ImagesPage />} />
+            <Route path="images/:conversationId" element={<ImagesPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>

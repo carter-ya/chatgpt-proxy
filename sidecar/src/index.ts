@@ -48,6 +48,7 @@ let lastChallengeOpenAt = 0;
 // to the correct Express response.
 interface StreamState {
   res: Response;
+  heartbeat: ReturnType<typeof setInterval>;
   buffer: string;
   lastContent: string;
   conversationId: string;
@@ -55,6 +56,7 @@ interface StreamState {
   currentEvent: string;
   deltaDecoder: DeltaV1Decoder | null;
   imageIds: Set<string>;
+  imageMode: boolean;
 }
 
 interface StreamImage {
@@ -66,9 +68,17 @@ interface StreamImage {
   height: number;
   download_url: string;
   generation_id?: string;
+  message_id?: string;
+  candidate_group_message_id?: string;
 }
 
 const activeStreams = new Map<string, StreamState>();
+
+function deleteActiveStream(streamId: string): void {
+  const state = activeStreams.get(streamId);
+  if (state) clearInterval(state.heartbeat);
+  activeStreams.delete(streamId);
+}
 
 // Sentinel token cache — pre-fetched on startup, refreshed every 5 minutes.
 // null means the initial fetch failed; proxy requests proceed without sentinel (non-fatal).
@@ -982,7 +992,7 @@ async function initializeBrowser(): Promise<void> {
         const tail = flushSSEStream(state);
         if (tail) state.res.write(tail);
         state.res.end();
-        activeStreams.delete(streamId);
+        deleteActiveStream(streamId);
       }
     },
   );
@@ -1630,19 +1640,76 @@ function normalizeSSELine(state: StreamState, line: string): string {
     state.conversationId = nextConversationId;
   }
   const content = extractContentDelta(state, parsed);
-  const images = extractGeneratedImages(parsed).filter((item) => !state.imageIds.has(item.file_id));
+  const progress = extractProgress(parsed);
+  const reasoning = extractReasoning(parsed);
+  const sources = extractSources(parsed);
+  const extractedImages = extractGeneratedImages(parsed);
+  // Image-generation streams can expose glimpse/preview assets before the
+  // async turn has finished. Only publish the turn-scoped final snapshot;
+  // otherwise the UI can display a stale or replaceable image as final.
+  const images = state.imageMode && state.currentEvent !== 'sidecar_final'
+    ? []
+    : state.currentEvent === 'sidecar_final'
+      ? extractedImages
+      : extractedImages.filter((item) => !state.imageIds.has(item.file_id));
   images.forEach((item) => state.imageIds.add(item.file_id));
 
-  if (!conversationId && !content && images.length === 0) {
+  if (!conversationId && !content && images.length === 0 && !progress && !reasoning && sources.length === 0) {
     return '';
   }
 
   const normalized: Record<string, unknown> = {};
   if (conversationId) normalized.conversation_id = conversationId;
   if (content) normalized.content = content;
+  const messageId = parsed?.message?.id || parsed?.id;
+  if ((content || images.length > 0) && typeof messageId === 'string') normalized.message_id = messageId;
+  if (progress) normalized.status = progress;
+  if (reasoning) normalized.reasoning = reasoning;
+  if (sources.length > 0) normalized.sources = sources;
   if (images.length > 0) normalized.images = images;
 
   return `data: ${JSON.stringify(normalized)}\n\n`;
+}
+
+function messageText(message: any): string {
+  const parts = message?.content?.parts;
+  if (Array.isArray(parts)) return parts.filter((part: unknown) => typeof part === 'string').join('\n');
+  return typeof message?.content?.text === 'string' ? message.content.text : '';
+}
+
+function extractProgress(parsed: any): string {
+  const message = parsed?.message || parsed;
+  const text = messageText(message).trim();
+  if (message?.metadata?.is_thinking_preamble_message === true && text) return text;
+  if (message?.metadata?.search_queries || message?.metadata?.search_model_queries) return '正在搜索资料';
+  if (message?.metadata?.search_result_groups) return '正在整理搜索结果';
+  if (message?.content?.content_type === 'thoughts' && text) return text;
+  return '';
+}
+
+function extractReasoning(parsed: any): string {
+  const message = parsed?.message || parsed;
+  const type = message?.content?.content_type;
+  if (type !== 'reasoning_recap' && type !== 'thoughts') return '';
+  return messageText(message).trim();
+}
+
+function extractSources(parsed: any): Array<{ id: string; title: string; url: string; domain?: string }> {
+  const message = parsed?.message || parsed;
+  const groups = message?.metadata?.search_result_groups;
+  if (!Array.isArray(groups)) return [];
+  const result: Array<{ id: string; title: string; url: string; domain?: string }> = [];
+  const seen = new Set<string>();
+  for (const group of groups) {
+    if (!Array.isArray(group?.entries)) continue;
+    for (const entry of group.entries) {
+      if (typeof entry?.url !== 'string' || seen.has(entry.url)) continue;
+      seen.add(entry.url);
+      result.push({ id: `source-${result.length + 1}`, title: entry.title || entry.url, url: entry.url, domain: group.domain || entry.attribution });
+      if (result.length >= 12) return result;
+    }
+  }
+  return result;
 }
 
 function extractConversationId(parsed: any): string {
@@ -1729,6 +1796,9 @@ function extractGeneratedImages(parsed: any): StreamImage[] {
   if (!Array.isArray(parts)) return [];
 
   const images: StreamImage[] = [];
+  const imagePartCount = parts.filter(
+    (part: any) => part && typeof part === 'object' && part.content_type === 'image_asset_pointer',
+  ).length;
   for (const part of parts) {
     if (!part || typeof part !== 'object' || part.content_type !== 'image_asset_pointer') continue;
     if (!part?.metadata?.generation && !part?.metadata?.dalle) continue;
@@ -1746,6 +1816,8 @@ function extractGeneratedImages(parsed: any): StreamImage[] {
       generation_id: typeof part?.metadata?.generation?.gen_id === 'string'
         ? part.metadata.generation.gen_id
         : (typeof part?.metadata?.dalle?.gen_id === 'string' ? part.metadata.dalle.gen_id : undefined),
+      message_id: typeof message?.id === 'string' ? message.id : undefined,
+      candidate_group_message_id: imagePartCount > 1 && typeof message?.id === 'string' ? message.id : undefined,
     });
   }
   return images;
@@ -2301,8 +2373,18 @@ async function handleStreamProxy(
     'X-Accel-Buffering': 'no',
   });
 
+  const heartbeat = setInterval(() => {
+    const state = activeStreams.get(streamId);
+    if (!state || state.res.writableEnded) {
+      deleteActiveStream(streamId);
+      return;
+    }
+    state.res.write(': heartbeat\n\n');
+  }, 15_000);
+
   activeStreams.set(streamId, {
     res,
+    heartbeat,
     buffer: '',
     lastContent: '',
     conversationId: '',
@@ -2310,11 +2392,14 @@ async function handleStreamProxy(
     currentEvent: 'message',
     deltaDecoder: null,
     imageIds: new Set<string>(),
+    imageMode: decodedBody?.includes('"picture_v2"') ?? false,
   });
 
-  // Clean up on client disconnect
-  req.on('close', () => {
-    activeStreams.delete(streamId);
+  // IncomingMessage "close" can fire after the request body completes even
+  // while the streaming response is still active. Only response closure means
+  // the downstream client has gone away.
+  res.once('close', () => {
+    deleteActiveStream(streamId);
   });
 
   // Fire-and-forget: the browser evaluate runs in the background and calls
@@ -2323,6 +2408,42 @@ async function handleStreamProxy(
     .evaluate(
       async ({ method, path: p, headers: hdrs, body: b, streamId: sid, imageMode }) => {
         const win = window as any;
+        // page.evaluate runs in the browser realm and cannot close over helper
+        // functions declared in the Node/sidecar realm. Keep final-snapshot
+        // parsing self-contained so a completed upstream generation is never
+        // turned into a local ReferenceError.
+        const browserMessageText = (message: any): string => {
+          const parts = message?.content?.parts;
+          if (Array.isArray(parts)) {
+            return parts.filter((part: unknown) => typeof part === 'string').join('\n');
+          }
+          return typeof message?.content?.text === 'string' ? message.content.text : '';
+        };
+        const browserExtractSources = (message: any): Array<{ id: string; title: string; url: string; domain?: string }> => {
+          const groups = message?.metadata?.search_result_groups;
+          if (!Array.isArray(groups)) return [];
+          const result: Array<{ id: string; title: string; url: string; domain?: string }> = [];
+          const seen = new Set<string>();
+          for (const group of groups) {
+            if (!Array.isArray(group?.entries)) continue;
+            for (const entry of group.entries) {
+              try {
+                if (typeof entry?.url !== 'string' || seen.has(entry.url)) continue;
+                seen.add(entry.url);
+                result.push({
+                  id: `source-${result.length + 1}`,
+                  title: typeof entry.title === 'string' && entry.title ? entry.title : entry.url,
+                  url: entry.url,
+                  domain: typeof group.domain === 'string' ? group.domain : entry.attribution,
+                });
+                if (result.length >= 12) return result;
+              } catch {
+                // A malformed source must not discard an otherwise complete response.
+              }
+            }
+          }
+          return result;
+        };
         try {
           const url = p;
           const fetchOptions: RequestInit = {
@@ -2498,7 +2619,11 @@ async function handleStreamProxy(
               // The handoff stream can contain only control metadata for image
               // generation. Read the finalized conversation in the same page
               // context and emit a normalized final snapshot.
-              for (let attempt = 0; attempt < 20; attempt++) {
+              let finalSnapshotSent = false;
+              let lastAsyncStatusError = '';
+              let lastDetailError = '';
+              const maxPollAttempts = imageMode ? 165 : 30;
+              for (let attempt = 0; attempt < maxPollAttempts; attempt++) {
                 const authEntry = Object.entries(hdrs || {}).find(
                   ([key]) => key.toLowerCase() === 'authorization',
                 );
@@ -2514,6 +2639,19 @@ async function handleStreamProxy(
                       credentials: 'include' as RequestCredentials,
                     },
                   );
+                  const asyncBody = await asyncResp.text().catch(() => '');
+                  if (!asyncResp.ok) {
+                    lastAsyncStatusError = `HTTP ${asyncResp.status}${asyncBody ? `: ${asyncBody.slice(0, 200)}` : ''}`;
+                  } else {
+                    try {
+                      const asyncPayload = JSON.parse(asyncBody);
+                      lastAsyncStatusError = asyncPayload?.status === 'OK'
+                        ? ''
+                        : `unexpected response: ${asyncBody.slice(0, 200)}`;
+                    } catch {
+                      lastAsyncStatusError = `invalid JSON response: ${asyncBody.slice(0, 200)}`;
+                    }
+                  }
                 }
                 const detailResp = await fetch(
                   `/backend-api/conversation/${encodeURIComponent(handoff.conversationId)}`,
@@ -2529,28 +2667,69 @@ async function handleStreamProxy(
                   const messages: any[] = Object.values(conversation?.mapping || {})
                     .map((node: any) => node?.message)
                     .filter(Boolean);
-                  const textMessages = messages
+                  const byCreateTime = (left: any, right: any) =>
+                    Number(left?.create_time || 0) - Number(right?.create_time || 0);
+                  const latestUserMessage = messages
+                    .filter((message: any) => message?.author?.role === 'user')
+                    .sort(byCreateTime)
+                    .at(-1);
+                  const currentTurnId = latestUserMessage?.metadata?.working_turn_id
+                    || latestUserMessage?.metadata?.turn_exchange_id;
+                  const currentTurnMessages = currentTurnId
+                    ? messages.filter((message: any) =>
+                      message?.metadata?.working_turn_id === currentTurnId
+                      || message?.metadata?.turn_exchange_id === currentTurnId,
+                    )
+                    : messages.filter((message: any) =>
+                      Number(message?.create_time || 0) >= Number(latestUserMessage?.create_time || 0),
+                    );
+                  const textMessages = currentTurnMessages
                     .filter((message: any) =>
                       message?.author?.role === 'assistant' &&
                       message?.content?.content_type === 'text' &&
                       message?.metadata?.is_thinking_preamble_message !== true,
                     )
-                    .sort((left: any, right: any) =>
-                      Number(left?.create_time || 0) - Number(right?.create_time || 0),
-                    );
+                    .sort(byCreateTime);
                   const latestText = textMessages.at(-1)?.content?.parts;
                   const content = Array.isArray(latestText)
                     ? latestText.filter((part: unknown) => typeof part === 'string').join('\n')
                     : '';
+                  const latestTextMessage = textMessages.at(-1);
+                  const sources = browserExtractSources(latestTextMessage || {});
+                  const reasoningMessages = currentTurnMessages
+                    .filter((message: any) => message?.author?.role === 'assistant' && ['thoughts', 'reasoning_recap'].includes(message?.content?.content_type))
+                    .sort(byCreateTime);
+                  const reasoning = reasoningMessages.map((message: any) => browserMessageText(message)).filter(Boolean).at(-1) || '';
                   const imageById = new Map<string, StreamImage>();
-                  for (const message of messages) {
-                    if (message?.author?.role === 'user' || !Array.isArray(message?.content?.parts)) continue;
+                  const candidateGroupByFile = new Map<string, string>();
+                  const candidateMessageByFile = new Map<string, string>();
+                  const finalImageMessages = currentTurnMessages.filter((message: any) =>
+                    message?.author?.role !== 'user'
+                    && message?.status === 'finished_successfully'
+                    && message?.metadata?.ghostrider?.status === 'final'
+                    && Array.isArray(message?.content?.parts)
+                    && message.content.parts.some((part: any) =>
+                      part?.content_type === 'image_asset_pointer'
+                      && (part?.metadata?.generation || part?.metadata?.dalle),
+                    ),
+                  );
+                  for (const message of finalImageMessages) {
+                    const imageParts = message.content.parts.filter(
+                      (part: any) => part?.content_type === 'image_asset_pointer'
+                        && (part?.metadata?.generation || part?.metadata?.dalle),
+                    );
                     for (const part of message.content.parts) {
                       if (part?.content_type !== 'image_asset_pointer') continue;
                       if (!part?.metadata?.generation && !part?.metadata?.dalle) continue;
                       const pointer = typeof part.asset_pointer === 'string' ? part.asset_pointer : '';
                       const fileId = pointer.replace(/^(?:sediment|file-service):\/\//, '');
-                      if (!fileId || imageById.has(fileId)) continue;
+                      if (!fileId) continue;
+                      if (imageParts.length > 1 && typeof message?.id === 'string') {
+                        candidateGroupByFile.set(fileId, message.id);
+                      } else if (imageParts.length === 1 && typeof message?.id === 'string') {
+                        candidateMessageByFile.set(fileId, message.id);
+                      }
+                      if (imageById.has(fileId)) continue;
                       imageById.set(fileId, {
                         file_id: fileId,
                         file_name: `${fileId}.png`,
@@ -2567,17 +2746,38 @@ async function handleStreamProxy(
                       });
                     }
                   }
-                  const images = Array.from(imageById.values());
-                  if (content || images.length > 0) {
+                  const images = Array.from(imageById.values()).map((image) => ({
+                    ...image,
+                    message_id: candidateMessageByFile.get(image.file_id) || image.message_id,
+                    candidate_group_message_id: candidateGroupByFile.get(image.file_id),
+                  }));
+                  const imageReady = imageMode && finalImageMessages.length > 0 && images.length > 0;
+                  const textReady = !imageMode && content.length > 0;
+                  if (textReady || imageReady) {
                     await win.__sidecarStreamChunk(
                       sid,
-                      `event: sidecar_final\ndata: ${JSON.stringify({ content, images })}\n\n`,
+                      `event: sidecar_final\ndata: ${JSON.stringify({ content, images, reasoning, sources, message_id: latestTextMessage?.id })}\n\n`,
                       false,
                     );
+                    finalSnapshotSent = true;
                     break;
                   }
+                  lastDetailError = '';
+                } else {
+                  lastDetailError = `HTTP ${detailResp.status}: ${(await detailResp.text().catch(() => '')).slice(0, 200)}`;
                 }
                 await new Promise((resolve) => setTimeout(resolve, 1000));
+              }
+              if (!finalSnapshotSent) {
+                const details = [
+                  lastAsyncStatusError && `async-status ${lastAsyncStatusError}`,
+                  lastDetailError && `conversation detail ${lastDetailError}`,
+                ].filter(Boolean).join('; ');
+                await win.__sidecarStreamChunk(
+                  sid,
+                  `event: error\ndata: ${imageMode ? 'Timed out waiting for the current image generation to finish' : 'Timed out waiting for the completed response'}${details ? `: ${details}` : ''}\n\n`,
+                  false,
+                );
               }
             } else if (initialText) {
               await win.__sidecarStreamChunk(sid, initialText, false);
@@ -2623,7 +2823,7 @@ async function handleStreamProxy(
       if (state && !state.res.writableEnded) {
         state.res.write(`event: error\ndata: ${err.message}\n\ndata: [DONE]\n\n`);
         state.res.end();
-        activeStreams.delete(streamId);
+        deleteActiveStream(streamId);
       }
     });
 }

@@ -19,12 +19,16 @@ interface ImageMessage {
   selectedImageID?: string;
 }
 
-interface OutletContext { loadConversations: () => Promise<void> }
+interface OutletContext {
+  loadConversations: () => Promise<void>;
+  announceConversation: (id: string, message: string, kind?: 'chat' | 'image') => void;
+  refreshConversationTitle: (id: string) => Promise<void>;
+}
 
 export default function ImagesPage() {
   const { conversationId } = useParams<{ conversationId: string }>();
   const navigate = useNavigate();
-  const { loadConversations } = useOutletContext<OutletContext>();
+  const { loadConversations, announceConversation, refreshConversationTitle } = useOutletContext<OutletContext>();
   const { sending, sendMessage, cancelStream } = useChat();
   const [messages, setMessages] = useState<ImageMessage[]>([]);
   const [reference, setReference] = useState<FileAsset>();
@@ -64,7 +68,12 @@ export default function ImagesPage() {
       attachments,
       imageMode: true,
       imageReference: reference,
-      onConversationCreated: (id) => { pendingConversation.current = id; },
+      onConversationCreated: (id) => {
+        if (pendingConversation.current === id) return;
+        pendingConversation.current = id;
+        announceConversation(id, text, 'image');
+        void refreshConversationTitle(id);
+      },
       onToken: (content) => updateStream((message) => ({ ...message, content })),
       onImages: (images) => updateStream((message) => {
         const merged = new Map((message.images || []).map((image) => [image.file_id, image]));
@@ -89,7 +98,7 @@ export default function ImagesPage() {
         streamID.current = '';
       },
     });
-  }, [conversationId, loadConversations, navigate, reference, sendMessage, updateStream]);
+  }, [announceConversation, conversationId, loadConversations, navigate, reference, refreshConversationTitle, sendMessage, updateStream]);
 
   const selectImage = useCallback(async (messageID: string, image: FileAsset) => {
     if (!conversationId) return;

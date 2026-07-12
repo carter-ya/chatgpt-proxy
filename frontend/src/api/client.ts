@@ -51,6 +51,7 @@ export interface Conversation {
   created_at: string;
   updated_at: string;
   kind?: 'chat' | 'image';
+  archived?: boolean;
 }
 
 export interface Source {
@@ -69,6 +70,22 @@ export interface Message {
   attachments?: FileAsset[];
   reasoning?: string;
   sources?: Source[];
+  image_groups?: ImageGroup[];
+}
+
+export interface ImageGroup {
+  matched_text: string;
+  aspect_ratio?: string;
+  images: SearchImage[];
+}
+
+export interface SearchImage {
+  thumbnail_url: string;
+  content_url: string;
+  source_url?: string;
+  title?: string;
+  width?: number;
+  height?: number;
 }
 
 export interface FileAsset {
@@ -104,6 +121,7 @@ export interface StreamPayload {
   status?: string;
   reasoning?: string;
   sources?: Source[];
+  image_groups?: ImageGroup[];
   error?: string;
 }
 
@@ -221,13 +239,13 @@ export const chat = {
     URL.revokeObjectURL(objectURL);
   },
 
-  listConversations: () =>
+  listConversations: (archived = false) =>
     apiClient.get<{
       items: Conversation[];
       total: number;
       limit: number;
       offset: number;
-    }>('/conversations'),
+    }>('/conversations', { params: archived ? { archived: true } : undefined }),
 
   getConversation: (id: string) =>
     apiClient.get<{ conversation: Conversation; messages: Message[] }>(
@@ -236,6 +254,11 @@ export const chat = {
 
   updateConversation: (id: string, data: Record<string, unknown>) =>
     apiClient.patch(`/conversations/${id}`, data),
+
+  archiveConversation: (id: string, archived: boolean) =>
+    apiClient.patch(`/conversations/${id}`, { is_archived: archived }),
+
+  deleteConversation: (id: string) => apiClient.delete(`/conversations/${id}`),
 };
 
 export default apiClient;

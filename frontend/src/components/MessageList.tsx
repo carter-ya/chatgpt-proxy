@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
 import ChatMessage from './ChatMessage';
-import type { FileAsset, Source } from '../api/client';
+import type { FileAsset, ImageGroup, Source } from '../api/client';
 
 interface LocalMessage {
   id: string;
@@ -12,6 +12,7 @@ interface LocalMessage {
   status?: string;
   reasoning?: string;
   sources?: Source[];
+  image_groups?: ImageGroup[];
   durationSeconds?: number;
   selectedImageID?: string;
 }
@@ -65,6 +66,7 @@ export default function MessageList({ messages, onRetry, onUseImage, editingImag
             status={msg.status}
             reasoning={msg.reasoning}
             sources={msg.sources}
+            imageGroups={msg.image_groups}
             durationSeconds={msg.durationSeconds}
             selectedImageID={msg.selectedImageID}
             editingImageID={editingImageID}

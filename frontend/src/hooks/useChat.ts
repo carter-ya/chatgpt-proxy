@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { chat, type FileAsset, type Source, type StreamPayload, type UploadedFile } from '../api/client';
+import { chat, type FileAsset, type ImageGroup, type Source, type StreamPayload, type UploadedFile } from '../api/client';
 import { sanitizeCitations } from '../utils/format';
 
 interface SendMessageParams {
@@ -18,6 +18,7 @@ interface SendMessageParams {
   onStatus?: (status: string) => void;
   onReasoning?: (reasoning: string) => void;
   onSources?: (sources: Source[]) => void;
+  onImageGroups?: (groups: ImageGroup[]) => void;
   onMessageId?: (id: string) => void;
   onDone?: (fullMessage: string) => void;
   onError?: (error: Error) => void;
@@ -138,6 +139,7 @@ export function useChat(): UseChatReturn {
           if (parsed.status) params.onStatus?.(parsed.status);
           if (parsed.reasoning) params.onReasoning?.(parsed.reasoning);
           if (parsed.sources?.length) params.onSources?.(parsed.sources);
+          if (parsed.image_groups?.length) params.onImageGroups?.(parsed.image_groups);
           if (parsed.message_id) params.onMessageId?.(parsed.message_id);
         }
       }
@@ -167,6 +169,7 @@ export function useChat(): UseChatReturn {
           if (parsed?.status) params.onStatus?.(parsed.status);
           if (parsed?.reasoning) params.onReasoning?.(parsed.reasoning);
           if (parsed?.sources?.length) params.onSources?.(parsed.sources);
+          if (parsed?.image_groups?.length) params.onImageGroups?.(parsed.image_groups);
           if (parsed?.message_id) params.onMessageId?.(parsed.message_id);
         }
       }

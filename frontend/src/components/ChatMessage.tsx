@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { isValidElement, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -6,7 +6,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { dracula } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import type { Components } from 'react-markdown';
 import { extractImages, sanitizeCitations } from '../utils/format';
-import { chat, type FileAsset, type Source } from '../api/client';
+import { chat, type FileAsset, type ImageGroup, type Source } from '../api/client';
 
 interface ChatMessageProps {
   id?: string;
@@ -18,6 +18,7 @@ interface ChatMessageProps {
   status?: string;
   reasoning?: string;
   sources?: Source[];
+  imageGroups?: ImageGroup[];
   durationSeconds?: number;
   selectedImageID?: string;
   editingImageID?: string;
@@ -26,15 +27,80 @@ interface ChatMessageProps {
   onSelectImage?: (image: FileAsset) => void;
 }
 
+function CodeBlock({ code, language }: { code: string; language?: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    await navigator.clipboard.writeText(code);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div className="code-block">
+      <div className="code-block-header">
+        <span>{language || '代码'}</span>
+        <button type="button" onClick={() => void copy()} aria-label="复制代码">{copied ? '已复制' : '复制'}</button>
+      </div>
+      {language ? (
+        <SyntaxHighlighter style={dracula} language={language} PreTag="div" customStyle={{ margin: 0, borderRadius: 0, background: 'transparent' }}>{code}</SyntaxHighlighter>
+      ) : <pre className="plain-code"><code>{code}</code></pre>}
+    </div>
+  );
+}
+
 const components: Components = {
+  pre({ children }) {
+    if (!isValidElement(children)) return <pre>{children}</pre>;
+    const childProps = children.props as { className?: string; children?: ReactNode };
+    const language = /language-([^\s]+)/.exec(childProps.className || '')?.[1];
+    return <CodeBlock code={String(childProps.children ?? '').replace(/\n$/, '')} language={language} />;
+  },
   code({ className, children, ...props }) {
-    const match = /language-(\w+)/.exec(className || '');
-    const code = String(children).replace(/\n$/, '');
-    return match ? (
-      <SyntaxHighlighter style={dracula} language={match[1]} PreTag="div" customStyle={{ margin: 0, borderRadius: 8 }}>{code}</SyntaxHighlighter>
-    ) : <code className={className} {...props}>{children}</code>;
+    return <code className={className} {...props}>{children}</code>;
   },
 };
+
+const imageGroupTokenPattern = /\uE200image_group\uE202[\s\S]*?\uE201/g;
+const partialImageGroupTokenPattern = /\uE200image_group(?:\uE202[\s\S]*)?$/g;
+
+function cleanRichTokens(value: string): string {
+  return value.replace(imageGroupTokenPattern, '').replace(partialImageGroupTokenPattern, '');
+}
+
+function ImageGroupGallery({ group }: { group: ImageGroup }) {
+  return (
+    <div className="search-image-group" aria-label="相关图片">
+      {group.images.map((image, index) => (
+        <a
+          key={`${image.content_url}-${index}`}
+          className="search-image-card"
+          href={image.content_url}
+          target="_blank"
+          rel="noreferrer"
+          title={image.title || '查看图片'}
+        >
+          <img src={image.thumbnail_url} alt={image.title || `相关图片 ${index + 1}`} loading="lazy" decoding="async" />
+          {image.source_url && <span onClick={(event) => { event.preventDefault(); event.stopPropagation(); window.open(image.source_url, '_blank', 'noopener,noreferrer'); }}>↗</span>}
+        </a>
+      ))}
+    </div>
+  );
+}
+
+function RichMessageContent({ content, imageGroups }: { content: string; imageGroups: ImageGroup[] }) {
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  imageGroups.forEach((group, index) => {
+    const position = content.indexOf(group.matched_text, cursor);
+    if (position < 0) return;
+    const before = cleanRichTokens(content.slice(cursor, position));
+    if (before) parts.push(<ReactMarkdown key={`text-${index}`} remarkPlugins={[remarkGfm]} components={components}>{sanitizeCitations(before)}</ReactMarkdown>);
+    parts.push(<ImageGroupGallery key={`images-${index}`} group={group} />);
+    cursor = position + group.matched_text.length;
+  });
+  const remaining = cleanRichTokens(content.slice(cursor));
+  if (remaining) parts.push(<ReactMarkdown key="text-final" remarkPlugins={[remarkGfm]} components={components}>{sanitizeCitations(remaining)}</ReactMarkdown>);
+  return <>{parts}</>;
+}
 
 const imageExtensionPattern = /\.(?:avif|gif|heic|heif|jpe?g|png|svg|webp)$/i;
 
@@ -114,7 +180,7 @@ function AuthenticatedImage({ image, selected, editing, onUse, onSelect }: { ima
   );
 }
 
-export default function ChatMessage({ role, content, images = [], attachments = [], streaming, status, reasoning, sources = [], durationSeconds, selectedImageID, editingImageID, onRetry, onUseImage, onSelectImage }: ChatMessageProps) {
+export default function ChatMessage({ role, content, images = [], attachments = [], streaming, status, reasoning, sources = [], imageGroups = [], durationSeconds, selectedImageID, editingImageID, onRetry, onUseImage, onSelectImage }: ChatMessageProps) {
   const [reasoningOpen, setReasoningOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const publicImages = role === 'assistant' ? extractImages(content) : [];
@@ -147,7 +213,7 @@ export default function ChatMessage({ role, content, images = [], attachments = 
         )}
 
         {role === 'assistant' ? (
-          <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{sanitizeCitations(content)}</ReactMarkdown></div>
+          <div className="markdown-body"><RichMessageContent content={content} imageGroups={imageGroups} /></div>
         ) : <div className="user-content">{content}</div>}
 
         {publicImages.map((url, index) => <img key={url} src={url} alt={`生成图片 ${index + 1}`} className="message-image" loading="lazy" decoding="async" />)}

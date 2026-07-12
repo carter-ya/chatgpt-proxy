@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom';
-import { chat, type FileAsset, type Source, type UploadedFile } from '../api/client';
+import { chat, type FileAsset, type ImageGroup, type Source, type UploadedFile } from '../api/client';
 import { useChat } from '../hooks/useChat';
 import MessageList from '../components/MessageList';
 import ChatInput from '../components/ChatInput';
@@ -16,17 +16,22 @@ interface LocalMessage {
   status?: string;
   reasoning?: string;
   sources?: Source[];
+  image_groups?: ImageGroup[];
   durationSeconds?: number;
   model?: string;
   thinkingEffort?: string;
 }
 
-interface OutletContext { loadConversations: () => Promise<void> }
+interface OutletContext {
+  loadConversations: () => Promise<void>;
+  announceConversation: (id: string, message: string, kind?: 'chat' | 'image') => void;
+  refreshConversationTitle: (id: string) => Promise<void>;
+}
 
 export default function ChatPage() {
   const { conversationId } = useParams<{ conversationId: string }>();
   const navigate = useNavigate();
-  const { loadConversations } = useOutletContext<OutletContext>();
+  const { loadConversations, announceConversation, refreshConversationTitle } = useOutletContext<OutletContext>();
   const { sending, sendMessage, cancelStream } = useChat();
   const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [loading, setLoading] = useState(false);
@@ -40,8 +45,13 @@ export default function ChatPage() {
     setMessages((current) => current.map((message) => message.id === targetID ? update(message) : message));
   }, []);
 
-  const callbacksFor = useCallback((newConversation: boolean) => ({
-    onConversationCreated: (id: string) => { if (newConversation) pendingConversationRef.current = id; },
+  const callbacksFor = useCallback((newConversation: boolean, initialMessage = '') => ({
+    onConversationCreated: (id: string) => {
+      if (!newConversation || pendingConversationRef.current === id) return;
+      pendingConversationRef.current = id;
+      announceConversation(id, initialMessage, 'chat');
+      void refreshConversationTitle(id);
+    },
     onToken: (content: string) => updateStreamingMessage((message) => ({ ...message, content })),
     onImages: (images: FileAsset[]) => updateStreamingMessage((message) => {
       const merged = new Map((message.images || []).map((image) => [image.file_id, image]));
@@ -51,6 +61,7 @@ export default function ChatPage() {
     onStatus: (status: string) => updateStreamingMessage((message) => ({ ...message, status })),
     onReasoning: (reasoning: string) => updateStreamingMessage((message) => ({ ...message, reasoning })),
     onSources: (sources: Source[]) => updateStreamingMessage((message) => ({ ...message, sources })),
+    onImageGroups: (image_groups: ImageGroup[]) => updateStreamingMessage((message) => ({ ...message, image_groups })),
     onMessageId: (upstreamId: string) => updateStreamingMessage((message) => ({ ...message, upstreamId })),
     onDone: () => {
       updateStreamingMessage((message) => ({ ...message, streaming: false, status: '', durationSeconds: Math.max(1, Math.round((Date.now() - startedAtRef.current) / 1000)) }));
@@ -65,7 +76,7 @@ export default function ChatPage() {
       streamMessageRef.current = null;
       pendingConversationRef.current = null;
     },
-  }), [loadConversations, navigate, updateStreamingMessage]);
+  }), [announceConversation, loadConversations, navigate, refreshConversationTitle, updateStreamingMessage]);
 
   useEffect(() => {
     if (!conversationId) { setMessages([]); setLoadError(''); return; }
@@ -89,7 +100,7 @@ export default function ChatPage() {
     setMessages((current) => [...current, { id: assistantID, role: 'assistant', content: '', streaming: true, status: '正在思考…', model, thinkingEffort }]);
     streamMessageRef.current = assistantID;
     startedAtRef.current = now;
-    await sendMessage({ message: text, model, thinkingEffort, conversationId, attachments, ...callbacksFor(!conversationId) });
+    await sendMessage({ message: text, model, thinkingEffort, conversationId, attachments, ...callbacksFor(!conversationId, text) });
   }, [callbacksFor, conversationId, sendMessage]);
 
   const handleRetry = useCallback(async (messageID: string) => {

@@ -72,6 +72,19 @@ interface StreamImage {
   candidate_group_message_id?: string;
 }
 
+interface StreamImageGroup {
+  matched_text: string;
+  aspect_ratio?: string;
+  images: Array<{
+    thumbnail_url: string;
+    content_url: string;
+    source_url?: string;
+    title?: string;
+    width?: number;
+    height?: number;
+  }>;
+}
+
 const activeStreams = new Map<string, StreamState>();
 
 function deleteActiveStream(streamId: string): void {
@@ -1643,6 +1656,7 @@ function normalizeSSELine(state: StreamState, line: string): string {
   const progress = extractProgress(parsed);
   const reasoning = extractReasoning(parsed);
   const sources = extractSources(parsed);
+  const imageGroups = extractImageGroups(parsed);
   const extractedImages = extractGeneratedImages(parsed);
   // Image-generation streams can expose glimpse/preview assets before the
   // async turn has finished. Only publish the turn-scoped final snapshot;
@@ -1654,7 +1668,7 @@ function normalizeSSELine(state: StreamState, line: string): string {
       : extractedImages.filter((item) => !state.imageIds.has(item.file_id));
   images.forEach((item) => state.imageIds.add(item.file_id));
 
-  if (!conversationId && !content && images.length === 0 && !progress && !reasoning && sources.length === 0) {
+  if (!conversationId && !content && images.length === 0 && !progress && !reasoning && sources.length === 0 && imageGroups.length === 0) {
     return '';
   }
 
@@ -1666,9 +1680,47 @@ function normalizeSSELine(state: StreamState, line: string): string {
   if (progress) normalized.status = progress;
   if (reasoning) normalized.reasoning = reasoning;
   if (sources.length > 0) normalized.sources = sources;
+  if (imageGroups.length > 0) normalized.image_groups = imageGroups;
   if (images.length > 0) normalized.images = images;
 
   return `data: ${JSON.stringify(normalized)}\n\n`;
+}
+
+function extractImageGroups(parsed: any): StreamImageGroup[] {
+  if (Array.isArray(parsed?.image_groups)) {
+    return parsed.image_groups.filter((group: any) =>
+      typeof group?.matched_text === 'string' && Array.isArray(group?.images) && group.images.length > 0,
+    );
+  }
+  const message = parsed?.message || parsed;
+  const references = message?.metadata?.content_references;
+  if (!Array.isArray(references)) return [];
+  const groups: StreamImageGroup[] = [];
+  for (const reference of references) {
+    if (reference?.type !== 'image_group' || typeof reference?.matched_text !== 'string') continue;
+    const images = Array.isArray(reference.images)
+      ? reference.images.flatMap((item: any) => {
+        const result = item?.image_result;
+        if (typeof result?.thumbnail_url !== 'string' || typeof result?.content_url !== 'string') return [];
+        return [{
+          thumbnail_url: result.thumbnail_url,
+          content_url: result.content_url,
+          source_url: typeof result.url === 'string' ? result.url : undefined,
+          title: typeof result.title === 'string' ? result.title : undefined,
+          width: Number(result?.thumbnail_size?.width || 0) || undefined,
+          height: Number(result?.thumbnail_size?.height || 0) || undefined,
+        }];
+      })
+      : [];
+    if (images.length > 0) {
+      groups.push({
+        matched_text: reference.matched_text,
+        aspect_ratio: typeof reference.aspect_ratio === 'string' ? reference.aspect_ratio : undefined,
+        images,
+      });
+    }
+  }
+  return groups;
 }
 
 function messageText(message: any): string {
@@ -2444,6 +2496,26 @@ async function handleStreamProxy(
           }
           return result;
         };
+        const browserExtractImageGroups = (message: any): StreamImageGroup[] => {
+          const references = message?.metadata?.content_references;
+          if (!Array.isArray(references)) return [];
+          return references.flatMap((reference: any) => {
+            if (reference?.type !== 'image_group' || typeof reference?.matched_text !== 'string' || !Array.isArray(reference?.images)) return [];
+            const images = reference.images.flatMap((item: any) => {
+              const result = item?.image_result;
+              if (typeof result?.thumbnail_url !== 'string' || typeof result?.content_url !== 'string') return [];
+              return [{
+                thumbnail_url: result.thumbnail_url,
+                content_url: result.content_url,
+                source_url: typeof result.url === 'string' ? result.url : undefined,
+                title: typeof result.title === 'string' ? result.title : undefined,
+                width: Number(result?.thumbnail_size?.width || 0) || undefined,
+                height: Number(result?.thumbnail_size?.height || 0) || undefined,
+              }];
+            });
+            return images.length > 0 ? [{ matched_text: reference.matched_text, aspect_ratio: reference.aspect_ratio, images }] : [];
+          });
+        };
         try {
           const url = p;
           const fetchOptions: RequestInit = {
@@ -2696,6 +2768,7 @@ async function handleStreamProxy(
                     : '';
                   const latestTextMessage = textMessages.at(-1);
                   const sources = browserExtractSources(latestTextMessage || {});
+                  const imageGroups = browserExtractImageGroups(latestTextMessage || {});
                   const reasoningMessages = currentTurnMessages
                     .filter((message: any) => message?.author?.role === 'assistant' && ['thoughts', 'reasoning_recap'].includes(message?.content?.content_type))
                     .sort(byCreateTime);
@@ -2756,7 +2829,7 @@ async function handleStreamProxy(
                   if (textReady || imageReady) {
                     await win.__sidecarStreamChunk(
                       sid,
-                      `event: sidecar_final\ndata: ${JSON.stringify({ content, images, reasoning, sources, message_id: latestTextMessage?.id })}\n\n`,
+                      `event: sidecar_final\ndata: ${JSON.stringify({ content, images, image_groups: imageGroups, reasoning, sources, message_id: latestTextMessage?.id })}\n\n`,
                       false,
                     );
                     finalSnapshotSent = true;

@@ -39,10 +39,11 @@ func New(db DBTX) *Queries {
 
 // Conversation represents a row in the conversations table.
 type Conversation struct {
-	ID     string
-	UserID string
-	Title  string
-	Kind   string
+	ID       string
+	UserID   string
+	Title    string
+	Kind     string
+	Archived bool
 }
 
 type File struct {
@@ -148,9 +149,9 @@ func (q *Queries) BindConversation(ctx context.Context, id, userID, title string
 // GetConversationByID returns a conversation by its id.
 // Returns a zero-value Conversation and an error (pgx.ErrNoRows) if not found.
 func (q *Queries) GetConversationByID(ctx context.Context, id string) (Conversation, error) {
-	const sql = `SELECT id, user_id, title, kind FROM conversations WHERE id = $1`
+	const sql = `SELECT id, user_id, title, kind, archived FROM conversations WHERE id = $1`
 	var c Conversation
-	err := q.db.QueryRow(ctx, sql, id).Scan(&c.ID, &c.UserID, &c.Title, &c.Kind)
+	err := q.db.QueryRow(ctx, sql, id).Scan(&c.ID, &c.UserID, &c.Title, &c.Kind, &c.Archived)
 	return c, err
 }
 
@@ -178,7 +179,7 @@ func (q *Queries) ListConversationIDsByUser(ctx context.Context, userID string) 
 }
 
 func (q *Queries) ListConversationsByUser(ctx context.Context, userID string) ([]Conversation, error) {
-	const sql = `SELECT id, user_id, title, kind FROM conversations WHERE user_id = $1`
+	const sql = `SELECT id, user_id, title, kind, archived FROM conversations WHERE user_id = $1`
 	rows, err := q.db.Query(ctx, sql, userID)
 	if err != nil {
 		return nil, err
@@ -187,12 +188,24 @@ func (q *Queries) ListConversationsByUser(ctx context.Context, userID string) ([
 	var conversations []Conversation
 	for rows.Next() {
 		var conversation Conversation
-		if err := rows.Scan(&conversation.ID, &conversation.UserID, &conversation.Title, &conversation.Kind); err != nil {
+		if err := rows.Scan(&conversation.ID, &conversation.UserID, &conversation.Title, &conversation.Kind, &conversation.Archived); err != nil {
 			return nil, err
 		}
 		conversations = append(conversations, conversation)
 	}
 	return conversations, rows.Err()
+}
+
+func (q *Queries) SetConversationArchived(ctx context.Context, id, userID string, archived bool) error {
+	const sql = `UPDATE conversations SET archived = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3`
+	_, err := q.db.Exec(ctx, sql, archived, id, userID)
+	return err
+}
+
+func (q *Queries) DeleteConversation(ctx context.Context, id, userID string) error {
+	const sql = `DELETE FROM conversations WHERE id = $1 AND user_id = $2`
+	_, err := q.db.Exec(ctx, sql, id, userID)
+	return err
 }
 
 func (q *Queries) CreateFile(ctx context.Context, id, userID, fileName, generationID string) error {

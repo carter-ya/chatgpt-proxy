@@ -56,6 +56,71 @@ test('历史消息清理引用、折叠思考并支持原地重试', async ({ pa
   expect(retryBody).toMatchObject({ assistant_message_id: 'a1' });
 });
 
+test('图片组与无语言代码块使用富组件渲染', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await authenticate(page);
+  await mockModels(page);
+  const marker = 'image_group{"aspect_ratio":"16:9","query":["water cycle"]}';
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ items: [{ id: 'rich', title: '雨的形成过程', model: 'gpt-5-6-thinking', updated_at: '2026-07-12T00:00:00Z', kind: 'chat' }], total: 1 }),
+  }));
+  await page.route('**/api/conversations/rich', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      conversation: { id: 'rich', title: '雨的形成过程', model: 'gpt-5-6-thinking' },
+      messages: [{
+        id: 'answer', role: 'assistant', content: `${marker}\n\n雨的形成过程：\n\n\`\`\`\n面积：1,000,000 平方米\n水量 = 10,000 立方米\n\`\`\``,
+        image_groups: [{ matched_text: marker, aspect_ratio: '16:9', images: [
+          { thumbnail_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', content_url: 'https://images.openai.com/full', title: '水循环图' },
+        ] }],
+      }],
+    }),
+  }));
+
+  await page.goto('/chat/rich');
+  await expect(page.getByAltText('水循环图')).toBeVisible();
+  await expect(page.locator('body')).not.toContainText('image_group');
+  await expect(page.locator('.code-block')).toContainText('面积：1,000,000 平方米');
+  await page.getByRole('button', { name: '复制代码' }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('水量 = 10,000 立方米');
+});
+
+test('新会话先显示临时标题再替换为上游标题', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  let conversationSent = false;
+  await page.route(/\/api\/conversations(?:\?.*)?$/, async (route) => {
+    if (!conversationSent) {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{"items":[],"total":0}' });
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    await route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ items: [{ id: 'created', title: '雨的形成过程', model: 'gpt-5-6-thinking', updated_at: '2026-07-12T00:00:00Z', kind: 'chat' }], total: 1 }),
+    });
+  });
+  await page.route('**/api/conversation', async (route) => {
+    conversationSent = true;
+    await route.fulfill({
+      status: 200, contentType: 'text/event-stream',
+      body: 'data: {"conversation_id":"created"}\n\ndata: {"content":"回答"}\n\ndata: [DONE]\n\n',
+    });
+  });
+  await page.route('**/api/conversations/created', (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ conversation: { id: 'created', title: '雨的形成过程', model: 'gpt-5-6-thinking' }, messages: [{ id: 'answer', role: 'assistant', content: '回答' }] }),
+  }));
+
+  await page.goto('/chat');
+  await page.getByPlaceholder('输入消息...').fill('请解释雨是怎么形成的');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect(page.locator('.conversation-item')).toContainText('请解释雨是怎么形成的');
+  await expect(page.locator('.conversation-item')).toContainText('雨的形成过程');
+});
+
 test('输入框支持多文件上传、任意格式和图片预览', async ({ page }) => {
   await authenticate(page);
   await mockModels(page);

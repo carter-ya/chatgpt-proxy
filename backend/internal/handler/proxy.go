@@ -101,14 +101,30 @@ type apiFileAsset struct {
 }
 
 type apiMessage struct {
-	ID          string         `json:"id"`
-	ParentID    string         `json:"parent_id,omitempty"`
-	Role        string         `json:"role"`
-	Content     string         `json:"content"`
-	Images      []apiFileAsset `json:"images,omitempty"`
-	Attachments []apiFileAsset `json:"attachments,omitempty"`
-	Reasoning   string         `json:"reasoning,omitempty"`
-	Sources     []apiSource    `json:"sources,omitempty"`
+	ID          string          `json:"id"`
+	ParentID    string          `json:"parent_id,omitempty"`
+	Role        string          `json:"role"`
+	Content     string          `json:"content"`
+	Images      []apiFileAsset  `json:"images,omitempty"`
+	Attachments []apiFileAsset  `json:"attachments,omitempty"`
+	Reasoning   string          `json:"reasoning,omitempty"`
+	Sources     []apiSource     `json:"sources,omitempty"`
+	ImageGroups []apiImageGroup `json:"image_groups,omitempty"`
+}
+
+type apiImageGroup struct {
+	MatchedText string           `json:"matched_text"`
+	AspectRatio string           `json:"aspect_ratio,omitempty"`
+	Images      []apiSearchImage `json:"images"`
+}
+
+type apiSearchImage struct {
+	ThumbnailURL string `json:"thumbnail_url"`
+	ContentURL   string `json:"content_url"`
+	SourceURL    string `json:"source_url,omitempty"`
+	Title        string `json:"title,omitempty"`
+	Width        int    `json:"width,omitempty"`
+	Height       int    `json:"height,omitempty"`
 }
 
 type apiSource struct {
@@ -867,7 +883,8 @@ func fileUseCase(contentType string) string {
 // Proxies to upstream, then filters the response to only include conversations
 // already owned by the current authenticated user.
 func (h *ProxyHandler) ListConversations(c *gin.Context) {
-	ctx := c.Request.Context()
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
 
 	// Extract authenticated user ID from context.
 	userID, _ := c.Get("user_id")
@@ -879,19 +896,29 @@ func (h *ProxyHandler) ListConversations(c *gin.Context) {
 
 	tokenValue := ""
 
+	archived := c.Query("archived") == "true"
 	upstreamPath := "/backend-api/conversations"
+	if archived {
+		upstreamPath += "?is_archived=true"
+	}
 	req, err := h.client.BuildRequest(ctx, http.MethodGet, upstreamPath, tokenValue, nil, "application/json")
 	if err != nil {
 		httpresp.Error(c, http.StatusInternalServerError, "构建代理请求失败")
 		return
 	}
 
+	upstreamStartedAt := time.Now()
 	resp, err := h.client.Do(req)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			httpresp.Error(c, http.StatusGatewayTimeout, "读取对话列表超时，请重试")
+			return
+		}
 		httpresp.Error(c, http.StatusBadGateway, "上游请求失败")
 		return
 	}
 	defer resp.Body.Close()
+	upstreamDuration := time.Since(upstreamStartedAt)
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		httpresp.Error(c, http.StatusServiceUnavailable, "浏览器登录态不可用，请在 sidecar Chrome 中重新登录后重试")
@@ -900,7 +927,19 @@ func (h *ProxyHandler) ListConversations(c *gin.Context) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			httpresp.Error(c, http.StatusGatewayTimeout, "读取对话列表超时，请重试")
+			return
+		}
 		httpresp.Error(c, http.StatusBadGateway, "读取上游响应失败")
+		return
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadGateway {
+			httpresp.Error(c, http.StatusServiceUnavailable, "Sidecar 浏览器不可用，请保持 Chrome 窗口开启后重试")
+			return
+		}
+		writeProxyError(c, resp.StatusCode, body, "读取对话列表失败")
 		return
 	}
 
@@ -911,12 +950,15 @@ func (h *ProxyHandler) ListConversations(c *gin.Context) {
 	}
 
 	// Filter upstream response by conversation ownership.
-	filtered, filterErr := h.filterConversationsByOwner(ctx, body, userIDStr)
+	filterStartedAt := time.Now()
+	filtered, filterErr := h.filterConversationsByOwner(ctx, body, userIDStr, archived)
+	filterDuration := time.Since(filterStartedAt)
 	if filterErr != nil {
 		log.Printf("[Proxy] ListConversations 过滤失败: %v", filterErr)
 		httpresp.Error(c, http.StatusInternalServerError, "读取用户对话归属失败")
 		return
 	}
+	log.Printf("[Proxy] ListConversations archived=%t upstream=%s local_filter=%s", archived, upstreamDuration.Round(time.Millisecond), filterDuration.Round(time.Millisecond))
 
 	c.Data(resp.StatusCode, "application/json", filtered)
 }
@@ -1068,7 +1110,7 @@ func normalizeConversationDetail(body []byte, conversationID string) (gin.H, err
 		case role == "assistant" && contentType == "text":
 			text := strings.Join(textParts, "\n")
 			if text != "" {
-				messages = append(messages, apiMessage{ID: messageID, ParentID: parentID, Role: "assistant", Content: sanitizeCitations(text), Reasoning: pendingReasoning, Sources: pendingSources})
+				messages = append(messages, apiMessage{ID: messageID, ParentID: parentID, Role: "assistant", Content: sanitizeCitations(text), Reasoning: pendingReasoning, Sources: pendingSources, ImageGroups: imageGroupsFromMetadata(metadata)})
 				pendingReasoning = ""
 				pendingSources = nil
 			}
@@ -1093,6 +1135,52 @@ func normalizeConversationDetail(body []byte, conversationID string) (gin.H, err
 		},
 		"messages": messages,
 	}, nil
+}
+
+func imageGroupsFromMetadata(metadata map[string]interface{}) []apiImageGroup {
+	references, _ := metadata["content_references"].([]interface{})
+	groups := make([]apiImageGroup, 0)
+	for _, rawReference := range references {
+		reference, _ := rawReference.(map[string]interface{})
+		if reference == nil || reference["type"] != "image_group" {
+			continue
+		}
+		matchedText, _ := reference["matched_text"].(string)
+		if matchedText == "" {
+			continue
+		}
+		images := make([]apiSearchImage, 0)
+		rawImages, _ := reference["images"].([]interface{})
+		for _, rawImage := range rawImages {
+			image, _ := rawImage.(map[string]interface{})
+			result, _ := image["image_result"].(map[string]interface{})
+			if result == nil {
+				continue
+			}
+			thumbnailURL, _ := result["thumbnail_url"].(string)
+			contentURL, _ := result["content_url"].(string)
+			if thumbnailURL == "" || contentURL == "" {
+				continue
+			}
+			sourceURL, _ := result["url"].(string)
+			title, _ := result["title"].(string)
+			thumbnailSize, _ := result["thumbnail_size"].(map[string]interface{})
+			images = append(images, apiSearchImage{
+				ThumbnailURL: thumbnailURL,
+				ContentURL:   contentURL,
+				SourceURL:    sourceURL,
+				Title:        title,
+				Width:        int(numberValue(thumbnailSize["width"])),
+				Height:       int(numberValue(thumbnailSize["height"])),
+			})
+		}
+		if len(images) == 0 {
+			continue
+		}
+		aspectRatio, _ := reference["aspect_ratio"].(string)
+		groups = append(groups, apiImageGroup{MatchedText: matchedText, AspectRatio: aspectRatio, Images: images})
+	}
+	return groups
 }
 
 func assetsFromMetadata(metadata map[string]interface{}) []apiFileAsset {
@@ -1386,7 +1474,7 @@ func (h *ProxyHandler) bindFilesFromConversation(ctx context.Context, userID str
 // filterConversationsByOwner takes the raw upstream JSON response body,
 // cross-references IDs with the local DB and returns only conversations owned
 // by the given user. Unknown upstream conversations are never auto-claimed.
-func (h *ProxyHandler) filterConversationsByOwner(ctx context.Context, body []byte, userID string) ([]byte, error) {
+func (h *ProxyHandler) filterConversationsByOwner(ctx context.Context, body []byte, userID string, archived ...bool) ([]byte, error) {
 	var response map[string]interface{}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, fmt.Errorf("解析上游响应失败: %w", err)
@@ -1407,9 +1495,12 @@ func (h *ProxyHandler) filterConversationsByOwner(ctx context.Context, body []by
 	if err != nil {
 		return nil, fmt.Errorf("查询用户对话失败: %w", err)
 	}
+	targetArchived := len(archived) > 0 && archived[0]
 	ownedKinds := make(map[string]string, len(ownedConversations))
 	for _, conversation := range ownedConversations {
-		ownedKinds[conversation.ID] = conversation.Kind
+		if conversation.Archived == targetArchived {
+			ownedKinds[conversation.ID] = conversation.Kind
+		}
 	}
 
 	// Filter items to only owned conversations.
@@ -1451,7 +1542,82 @@ func (h *ProxyHandler) UpdateConversation(c *gin.Context) {
 	if !h.requireConversationOwner(c, id, userID) {
 		return
 	}
-	h.proxyWithBody(c, http.MethodPatch, "/backend-api/conversation/"+url.PathEscape(id))
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		httpresp.Error(c, http.StatusBadRequest, "读取请求体失败")
+		return
+	}
+	var update struct {
+		IsArchived *bool `json:"is_archived"`
+	}
+	if err := json.Unmarshal(body, &update); err != nil {
+		httpresp.Error(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	status, responseBody, err := h.doUpstreamRequest(c.Request.Context(), http.MethodPatch, "/backend-api/conversation/"+url.PathEscape(id), body)
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, "更新上游对话失败")
+		return
+	}
+	if status < 200 || status >= 300 {
+		writeProxyError(c, status, responseBody, "更新对话失败")
+		return
+	}
+	if update.IsArchived != nil {
+		if err := h.queries.SetConversationArchived(c.Request.Context(), id, userID, *update.IsArchived); err != nil {
+			httpresp.Error(c, http.StatusInternalServerError, "保存归档状态失败")
+			return
+		}
+	}
+	c.Data(status, "application/json", responseBody)
+}
+
+// DeleteConversation permanently deletes an owned conversation upstream and
+// removes its local ownership record only after the upstream operation succeeds.
+func (h *ProxyHandler) DeleteConversation(c *gin.Context) {
+	id := c.Param("id")
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
+	if !h.requireConversationOwner(c, id, userID) {
+		return
+	}
+	// ChatGPT represents deletion as hiding a conversation. Using the upstream
+	// visibility mutation keeps this endpoint compatible with the browser API.
+	status, body, err := h.doUpstreamRequest(c.Request.Context(), http.MethodPatch, "/backend-api/conversation/"+url.PathEscape(id), []byte(`{"is_visible":false}`))
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, "删除上游对话失败")
+		return
+	}
+	if status < 200 || status >= 300 {
+		writeProxyError(c, status, body, "删除对话失败")
+		return
+	}
+	if err := h.queries.DeleteConversation(c.Request.Context(), id, userID); err != nil {
+		httpresp.Error(c, http.StatusInternalServerError, "清理本地对话失败")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *ProxyHandler) doUpstreamRequest(ctx context.Context, method, path string, body []byte) (int, []byte, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := h.client.BuildRequest(ctx, method, path, "", reader, "application/json")
+	if err != nil {
+		return 0, nil, err
+	}
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, responseBody, err
 }
 
 // proxyGet is a helper for simple GET proxy endpoints.

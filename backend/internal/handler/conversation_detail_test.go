@@ -118,3 +118,47 @@ func TestNormalizeConversationDetailPreservesReasoningSourcesAndCandidateIDs(t *
 		t.Fatalf("sources = %#v", answer.Sources)
 	}
 }
+
+func TestNormalizeConversationDetailExtractsImageGroups(t *testing.T) {
+	marker := "image_group{\"aspect_ratio\":\"16:9\",\"query\":[\"water cycle\"]}"
+	raw := map[string]interface{}{
+		"title": "water", "current_node": "answer",
+		"mapping": map[string]interface{}{
+			"answer": map[string]interface{}{
+				"parent": nil,
+				"message": map[string]interface{}{
+					"id":      "answer",
+					"author":  map[string]interface{}{"role": "assistant"},
+					"content": map[string]interface{}{"content_type": "text", "parts": []interface{}{marker + "\nExplanation"}},
+					"metadata": map[string]interface{}{"content_references": []interface{}{
+						map[string]interface{}{
+							"type": "image_group", "matched_text": marker, "aspect_ratio": "16:9",
+							"images": []interface{}{
+								map[string]interface{}{"image_result": map[string]interface{}{
+									"thumbnail_url": "https://images.openai.com/thumb", "content_url": "https://images.openai.com/full",
+									"url": "https://example.com/source", "title": "Water cycle", "thumbnail_size": map[string]interface{}{"width": float64(640), "height": float64(360)},
+								}},
+							},
+						},
+					}},
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(raw)
+	result, err := normalizeConversationDetail(body, "conversation-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := result["messages"].([]apiMessage)
+	if len(messages) != 1 || len(messages[0].ImageGroups) != 1 {
+		t.Fatalf("image groups = %#v", messages)
+	}
+	group := messages[0].ImageGroups[0]
+	if group.MatchedText != marker || group.AspectRatio != "16:9" || len(group.Images) != 1 {
+		t.Fatalf("image group = %#v", group)
+	}
+	if group.Images[0].ThumbnailURL != "https://images.openai.com/thumb" || group.Images[0].Width != 640 {
+		t.Fatalf("image = %#v", group.Images[0])
+	}
+}

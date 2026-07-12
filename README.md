@@ -1,16 +1,56 @@
 # ChatGPT Proxy
 
-## 本地启动
+基于 Go、React、PostgreSQL 和 Playwright Chrome Sidecar 构建的自托管 ChatGPT 代理。项目复用已登录的 `chatgpt.com` 浏览器会话，为本地用户提供流式聊天、图片创作、文件上传和会话管理能力。
 
-项目由三部分组成：
+> [!IMPORTANT]
+> 本项目依赖 ChatGPT 网页端的非公开接口，仅适合个人开发、研究和受控环境使用。上游接口变化可能导致功能失效，请勿将其视为 OpenAI 官方 API 的替代品。
 
-- Go 后端：提供本应用的登录、注册、代理 API 和数据库迁移。
-- React 前端：聊天界面。
-- Playwright sidecar：打开本机 Chrome，并使用已登录的 `chatgpt.com` 浏览器态请求上游。
+## 功能特性
 
-### 1. 准备环境变量
+- 本地用户注册、登录和 JWT 鉴权
+- 按用户隔离会话、上传文件和生成图片
+- ChatGPT 流式回复、思考进度、思考摘要和搜索来源
+- 动态读取当前 ChatGPT 账号可用的模型与思考档位
+- 多文件点击、拖放和粘贴上传，单文件上限 50 MB
+- 独立 Images 工作区，支持图片生成、候选选择和引用编辑
+- 会话历史、快速标题、归档、恢复和永久删除
+- Markdown、表格、代码高亮、代码复制和搜索图片组渲染
+- 桌面端和移动端响应式界面
 
-复制 `.env.example` 为 `.env`，至少配置：
+## 架构概览
+
+```mermaid
+flowchart LR
+    Browser[React Web UI] -->|JWT / SSE| Backend[Go API]
+    Backend --> PostgreSQL[(PostgreSQL)]
+    Backend -->|HTTP Proxy| Sidecar[Playwright Sidecar]
+    Sidecar -->|Chrome CDP + 登录态| ChatGPT[chatgpt.com]
+```
+
+- `frontend/`：React + Vite 单页应用。
+- `backend/`：Gin API、认证、资源归属校验、数据库迁移和上游响应规范化。
+- `sidecar/`：通过 Playwright/CDP 控制本机 Chrome，并以浏览器登录态访问 ChatGPT。
+- PostgreSQL：保存本地用户、会话归属、文件归属和归档状态；消息正文仍由 ChatGPT 上游保存。
+
+## 前置要求
+
+- Go 1.25+
+- Node.js 18+ 和 npm
+- Google Chrome Stable
+- Docker 和 Docker Compose（用于本地 PostgreSQL）
+- 一个可正常登录 `chatgpt.com` 的账号
+
+## Quick Start
+
+### 1. 准备配置
+
+在项目根目录复制配置模板：
+
+```sh
+cp .env.example .env
+```
+
+编辑 `.env`，至少设置：
 
 ```env
 XIAOMING_DATABASE_URL=postgres://chatgpt_proxy:dev_secret@localhost:5432/chatgpt_proxy?sslmode=disable
@@ -22,100 +62,120 @@ XIAOMING_CHROME_LAUNCH_MODE=cdp
 XIAOMING_CHROME_CDP_PORT=9222
 ```
 
-如果本机 `5432` 已被占用，可设置 `XIAOMING_POSTGRES_PORT=5433`，并把
-`XIAOMING_DATABASE_URL` 中的端口同步改为 `5433`。
-
-生成 32 字节 base64 加密密钥：
+生成加密密钥：
 
 ```sh
 openssl rand -base64 32
 ```
 
-`XIAOMING_SESSION_TOKENS` 是已废弃的旧 token-pool 配置；当前默认链路只使用 sidecar Chrome 登录态，不读取本地 token 池。
+如果本机 `5432` 已被占用，请同时修改 `XIAOMING_POSTGRES_PORT` 和 `XIAOMING_DATABASE_URL` 中的端口。
 
-项目的 `/images` 页面对应 ChatGPT 独立 Images 工作区，使用 `picture_v2` 图片模式和异步状态轮询，不等同于普通聊天中输入“生成图片”。
-
-聊天输入框会从当前 sidecar 登录账号动态读取可用模型与思考档位，并支持点击、拖放或粘贴多个文件（单文件上限 50MB）。图片会在发送前显示预览；其他格式交由 ChatGPT 的上传能力判断。
-
-普通聊天和图片工作区都会展示上游提供的思考进度、折叠后的思考摘要与搜索来源。图片工作区采用完整聊天时间线：每轮生成结果都会追加保留，候选选择与引用编辑是两个独立操作。
-
-### 多用户资源隔离
-
-sidecar 的上游 ChatGPT 账号是共享的，但本地 API 会按 JWT 中的 `user_id`
-严格隔离会话和文件。新会话在 SSE 返回 `conversation_id` 时立即绑定当前用户，
-上传文件和生成图片也会记录归属。详情、继续对话、改名、图片引用和文件下载
-都会先验证归属；未知的上游资源不会自动认领，归属查询失败时请求会被拒绝。
-
-### 2. 启动服务
-
-启动数据库：
+### 2. 启动 PostgreSQL
 
 ```sh
 docker compose up -d postgres
 ```
 
-启动 sidecar：
+### 3. 安装依赖
 
 ```sh
+cd sidecar && npm ci
+cd ../frontend && npm ci
+cd ..
+```
+
+Go 依赖会在首次构建或运行时自动下载，也可以提前执行：
+
+```sh
+go mod download
+```
+
+### 4. 启动服务
+
+分别在三个终端运行：
+
+```sh
+# Terminal 1: Sidecar
 cd sidecar
 npm run dev
 ```
 
-sidecar 默认以 CDP 模式启动本机 Chrome Stable：先用最少参数打开 Chrome 检查登录态，再通过 `127.0.0.1:9222` 连接该窗口。这个模式比 Playwright `launchPersistentContext` 更接近日常手动打开 Chrome 的状态。
-
-首次验证某个 profile，或登录态失效时，sidecar 会自动切换到 plain 登录流程：
-
-1. 关闭已连接的 CDP Chrome。
-2. 打开一个不带 `--remote-debugging-port`、不带 DevTools 连接的普通 Chrome。
-3. 你在这个普通 Chrome 中完成 `chatgpt.com` 登录。
-4. 登录完成后退出这个 Chrome，sidecar 会重新用 CDP 接管同一 profile。
-
-这个流程用于避免登录页在 debugger-attached Chrome 中反复触发 Cloudflare challenge。sidecar 会复用 `.browser-profile` 保存的登录态。若确实需要旧行为，可设置 `XIAOMING_CHROME_LOGIN_MODE=attached`。
-
-如果本机 Chrome 安装位置特殊，可设置 `XIAOMING_CHROME_EXECUTABLE_PATH` 为完整路径。若需要回退旧模式，可设置 `XIAOMING_CHROME_LAUNCH_MODE=persistent`，并继续使用 `XIAOMING_CHROME_CHANNEL=chrome`。
-
-如果 Chrome 页面出现 Cloudflare challenge，请在当前可见 Chrome 窗口内手动完成；sidecar 不会自动刷新 challenge 页面，避免打断验证流程。
-
-如果登录页 `auth.openai.com` 的 Cloudflare checkbox 反复出现，优先用日常 Chrome profile：
-
-1. 退出所有普通 Chrome 窗口。
-2. 在 `.env` 设置：
-
-```env
-XIAOMING_CHROME_USER_DATA_DIR=/Users/<you>/Library/Application Support/Google/Chrome
-XIAOMING_CHROME_PROFILE_DIRECTORY=Default
-```
-
-3. 重新启动 sidecar。
-
-这会让 sidecar 使用你平时 Chrome 的本地 profile 信任状态。不要同时打开普通 Chrome 和 sidecar 使用同一个 profile，否则 Chrome 会因为 profile 锁冲突或状态竞争而异常。
-
-若你的普通 Chrome 可以登录，但 sidecar Chrome 在 `brunhild.challenges.cloudflare.com` 上显示 `net::ERR_CONNECTION_CLOSED` 或反复 challenge，优先检查两者的代理/profile 是否一致。sidecar 默认使用独立 profile，不会自动继承普通 Chrome profile 里的代理扩展、登录信任状态或站点数据。
-
-如果普通 Chrome 依赖本地代理，可在 `.env` 显式指定：
-
-```env
-XIAOMING_CHROME_PROXY_SERVER=socks5://127.0.0.1:7890
-XIAOMING_CHROME_PROXY_BYPASS_LIST=<-loopback>
-```
-
-如果确实需要临时诊断 DNS/IPv6 问题，可手动设置 `XIAOMING_CHROME_HOST_RESOLVER_RULES`，但它会让 Chrome 显示“不受支持的命令行标记”警告，默认不启用。
-
-启动后端：
-
 ```sh
+# Terminal 2: Backend
 go run ./backend/cmd/server
 ```
 
-启动前端：
-
 ```sh
+# Terminal 3: Frontend
 cd frontend
 npm run dev
 ```
 
-如果通过反向代理域名或移动设备进行稳定验收，请使用生产构建预览，避免 Vite
-开发热更新在保存文件时触发页面重新渲染：
+打开 Vite 输出的本地地址（通常为 `http://127.0.0.1:5173`），注册本地账号后即可使用。后端健康检查默认为 `http://127.0.0.1:8080/api/health`。
+
+## 环境变量
+
+完整配置及注释见 [.env.example](.env.example)。常用变量如下：
+
+| 变量 | 必需 | 默认值 | 用途 |
+| --- | --- | --- | --- |
+| `XIAOMING_DATABASE_URL` | 是 | 无 | PostgreSQL 连接字符串 |
+| `XIAOMING_ENCRYPTION_KEY` | 是 | 无 | 32 字节 Base64 加密密钥 |
+| `XIAOMING_JWT_SECRET` | 是 | 无 | 本地 JWT 签名密钥 |
+| `XIAOMING_JWT_EXPIRATION` | 否 | `24h` | JWT 有效期 |
+| `XIAOMING_SERVER_PORT` | 否 | `8080` | 后端监听端口 |
+| `XIAOMING_SIDECAR_URL` | 否 | `http://127.0.0.1:3100` | Sidecar 地址 |
+| `XIAOMING_CHROME_LAUNCH_MODE` | 否 | `cdp` | Chrome 启动方式：`cdp` 或 `persistent` |
+| `XIAOMING_CHROME_LOGIN_MODE` | 否 | `plain` | 首次登录方式：`plain` 或 `attached` |
+| `XIAOMING_CHROME_USER_DATA_DIR` | 否 | `sidecar/.browser-profile` | Chrome 用户数据目录 |
+| `XIAOMING_CHROME_PROFILE_DIRECTORY` | 否 | `Default` | Chrome profile 名称 |
+| `XIAOMING_CHROME_PROXY_SERVER` | 否 | 无 | Chrome 显式代理地址 |
+
+`XIAOMING_SESSION_TOKENS` 已废弃；当前链路只使用 Sidecar Chrome 登录态。
+
+## 使用说明
+
+### 普通聊天
+
+聊天输入框会从 Sidecar 当前登录账号动态读取模型和思考档位。回复支持流式文本、Markdown、代码块、搜索来源和图片组。新会话会在创建后立即出现在侧栏，稍后自动替换为 ChatGPT 生成的正式标题。
+
+### Images 工作区
+
+`/images` 对应 ChatGPT 独立 Images 工作区，使用 `picture_v2` 图片模式和异步状态轮询。每轮生成结果都会保留在时间线中；候选选择和“以此图编辑”是两个独立操作。
+
+### 多用户资源隔离
+
+所有本地用户共享一个 Sidecar ChatGPT 账号，但后端会按 JWT 中的 `user_id` 隔离会话和文件。新会话在 SSE 返回 `conversation_id` 时绑定当前用户；未知的上游资源不会自动认领，归属检查失败时请求会被拒绝。
+
+## 测试与构建
+
+后端：
+
+```sh
+go test ./...
+go vet ./...
+# 或
+make test
+make vet
+```
+
+Sidecar：
+
+```sh
+cd sidecar
+npm run build
+```
+
+前端：
+
+```sh
+cd frontend
+npm run lint
+npm run build
+npm run test:e2e
+```
+
+稳定验收或反向代理场景可以使用生产构建预览：
 
 ```sh
 cd frontend
@@ -123,14 +183,58 @@ npm run build
 npm run preview -- --host 127.0.0.1 --port 4173
 ```
 
-访问 Vite 输出的本地地址，注册或登录本应用账号后即可使用。
+## Chrome 与 Cloudflare 排障
 
-## Neon 数据库免费套餐限制
+### 首次登录
 
-本项目使用 Neon PostgreSQL 云服务。免费套餐包含以下限制：
+Sidecar 默认以 CDP 模式启动 Chrome。首次验证 profile 或登录态失效时，会打开一个不带 DevTools 连接的普通 Chrome：
 
-- **计算配额**: 100 CU-hours/月
-- **存储空间**: 0.5 GB/项目
-- **实例规格**: 最高 2 CU（8 GB RAM）
+1. 在该窗口完成 `chatgpt.com` 登录。
+2. 登录完成后退出这个 Chrome。
+3. Sidecar 会重新以 CDP 模式接管同一 profile。
 
-> 来源: https://neon.tech/pricing
+如果 Chrome 安装位置特殊，请设置 `XIAOMING_CHROME_EXECUTABLE_PATH`。需要回退旧模式时，可以设置 `XIAOMING_CHROME_LAUNCH_MODE=persistent`。
+
+### Cloudflare challenge
+
+如果 Chrome 出现 Cloudflare challenge，请在可见窗口中手动完成。不要关闭 Sidecar 管理的 Chrome；CDP 断开后，上游接口会返回 503。
+
+如果验证反复出现，可以在完全退出普通 Chrome 后复用日常 profile：
+
+```env
+XIAOMING_CHROME_USER_DATA_DIR=/Users/<you>/Library/Application Support/Google/Chrome
+XIAOMING_CHROME_PROFILE_DIRECTORY=Default
+```
+
+不要让普通 Chrome 和 Sidecar 同时使用同一 profile，否则会发生 profile 锁冲突。
+
+如果日常 Chrome 依赖本地代理，请显式配置：
+
+```env
+XIAOMING_CHROME_PROXY_SERVER=socks5://127.0.0.1:7890
+XIAOMING_CHROME_PROXY_BYPASS_LIST=<-loopback>
+```
+
+仅在诊断 DNS/IPv6 问题时使用 `XIAOMING_CHROME_HOST_RESOLVER_RULES`；启用后 Chrome 会显示“不受支持的命令行标记”警告。
+
+## 可选：使用 Neon
+
+本地开发默认使用 Docker PostgreSQL，也可以将 `XIAOMING_DATABASE_URL` 指向 Neon 或其他兼容 PostgreSQL 服务。Neon 配置通常需要 `sslmode=require`；套餐限制和价格请以 [Neon 官方定价](https://neon.com/pricing) 为准。
+
+## 安全注意事项
+
+- `.env` 包含数据库凭据和密钥，必须保持在 Git 忽略列表中，建议文件权限设为 `0600`。
+- `sidecar/.browser-profile` 包含 ChatGPT Cookie 和登录态，不要提交、复制到不可信设备或打包进镜像。
+- 不要在多个用户之间共享本地 JWT secret 或数据库。
+- Sidecar 上游账号是共享资源；本地资源隔离不能替代独立的上游 ChatGPT 账号隔离。
+- 如需公网部署，请在前端增加可信反向代理、TLS、访问控制和速率限制。
+
+## 部署说明
+
+当前 `Dockerfile` 只构建 Go 后端，`docker-compose.yml` 主要用于本地 PostgreSQL 和后端开发。前端静态资源、Sidecar Chrome、TLS 和反向代理需要根据目标环境单独部署。
+
+## License
+
+本项目采用 [Apache License 2.0](LICENSE) 开源。你可以自由使用、修改、分发和商用本项目代码，但需要遵守许可证中的署名、变更说明和再分发要求。
+
+该许可证仅适用于本仓库代码，不授予任何 OpenAI/ChatGPT 商标、账号、内容或网页端接口的使用权。

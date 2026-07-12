@@ -55,7 +55,7 @@ func New(cfg *config.Config) (*App, error) {
 	}
 
 	if hasConfiguredSessionTokens(cfg.SessionTokens) {
-		log.Printf("[app] XIAOMING_SESSION_TOKENS 已忽略：当前默认认证链路使用 sidecar Chrome 登录态")
+		log.Printf("[app] CHATGPT_PROXY_SESSION_TOKENS 已忽略：当前默认认证链路使用 sidecar Chrome 登录态")
 	}
 
 	proxyClient := proxy.NewBrowserProxyClient(cfg.SidecarURL, cfg.ChatGPTBaseURL)

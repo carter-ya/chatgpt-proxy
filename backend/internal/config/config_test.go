@@ -5,20 +5,20 @@ import (
 	"testing"
 )
 
-// TestSessionTokensLoaded 验证 XIAOMING_SESSION_TOKENS 能正确加载到 Config.SessionTokens。
+// TestSessionTokensLoaded 验证 CHATGPT_PROXY_SESSION_TOKENS 能正确加载到 Config.SessionTokens。
 func TestSessionTokensLoaded(t *testing.T) {
 	// 设置测试所需的环境变量（模拟 .env 加载后的状态）。
-	os.Setenv("XIAOMING_DATABASE_URL", "postgres://test:test@localhost:5432/testdb")
-	os.Setenv("XIAOMING_JWT_SECRET", "test-jwt-secret")
-	os.Setenv("XIAOMING_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
-	os.Setenv("XIAOMING_SESSION_TOKENS", "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0.test-token-payload")
-	os.Setenv("XIAOMING_JWT_EXPIRATION", "24h")
+	os.Setenv("CHATGPT_PROXY_DATABASE_URL", "postgres://test:test@localhost:5432/testdb")
+	os.Setenv("CHATGPT_PROXY_JWT_SECRET", "test-jwt-secret")
+	os.Setenv("CHATGPT_PROXY_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
+	os.Setenv("CHATGPT_PROXY_SESSION_TOKENS", "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0.test-token-payload")
+	os.Setenv("CHATGPT_PROXY_JWT_EXPIRATION", "24h")
 	defer func() {
-		os.Unsetenv("XIAOMING_DATABASE_URL")
-		os.Unsetenv("XIAOMING_JWT_SECRET")
-		os.Unsetenv("XIAOMING_ENCRYPTION_KEY")
-		os.Unsetenv("XIAOMING_SESSION_TOKENS")
-		os.Unsetenv("XIAOMING_JWT_EXPIRATION")
+		os.Unsetenv("CHATGPT_PROXY_DATABASE_URL")
+		os.Unsetenv("CHATGPT_PROXY_JWT_SECRET")
+		os.Unsetenv("CHATGPT_PROXY_ENCRYPTION_KEY")
+		os.Unsetenv("CHATGPT_PROXY_SESSION_TOKENS")
+		os.Unsetenv("CHATGPT_PROXY_JWT_EXPIRATION")
 	}()
 
 	cfg, err := Load()
@@ -38,19 +38,19 @@ func TestSessionTokensLoaded(t *testing.T) {
 
 // TestOtherEnvVarsStillWork 验证其他环境变量在修复后仍正常加载。
 func TestOtherEnvVarsStillWork(t *testing.T) {
-	os.Setenv("XIAOMING_DATABASE_URL", "postgres://user:pass@localhost:5432/mydb")
-	os.Setenv("XIAOMING_JWT_SECRET", "my-jwt-secret")
-	os.Setenv("XIAOMING_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
-	os.Setenv("XIAOMING_CHATGPT_BASE_URL", "https://chat.openai.com")
-	os.Setenv("XIAOMING_SESSION_TOKENS", "token1,token2,token3")
-	os.Setenv("XIAOMING_JWT_EXPIRATION", "24h")
+	os.Setenv("CHATGPT_PROXY_DATABASE_URL", "postgres://user:pass@localhost:5432/mydb")
+	os.Setenv("CHATGPT_PROXY_JWT_SECRET", "my-jwt-secret")
+	os.Setenv("CHATGPT_PROXY_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
+	os.Setenv("CHATGPT_PROXY_CHATGPT_BASE_URL", "https://chat.openai.com")
+	os.Setenv("CHATGPT_PROXY_SESSION_TOKENS", "token1,token2,token3")
+	os.Setenv("CHATGPT_PROXY_JWT_EXPIRATION", "24h")
 	defer func() {
-		os.Unsetenv("XIAOMING_DATABASE_URL")
-		os.Unsetenv("XIAOMING_JWT_SECRET")
-		os.Unsetenv("XIAOMING_ENCRYPTION_KEY")
-		os.Unsetenv("XIAOMING_CHATGPT_BASE_URL")
-		os.Unsetenv("XIAOMING_SESSION_TOKENS")
-		os.Unsetenv("XIAOMING_JWT_EXPIRATION")
+		os.Unsetenv("CHATGPT_PROXY_DATABASE_URL")
+		os.Unsetenv("CHATGPT_PROXY_JWT_SECRET")
+		os.Unsetenv("CHATGPT_PROXY_ENCRYPTION_KEY")
+		os.Unsetenv("CHATGPT_PROXY_CHATGPT_BASE_URL")
+		os.Unsetenv("CHATGPT_PROXY_SESSION_TOKENS")
+		os.Unsetenv("CHATGPT_PROXY_JWT_EXPIRATION")
 	}()
 
 	cfg, err := Load()
@@ -91,17 +91,17 @@ func TestOtherEnvVarsStillWork(t *testing.T) {
 
 // TestSessionTokensSingleToken 验证单个 token（无逗号）的加载。
 func TestSessionTokensSingleToken(t *testing.T) {
-	os.Setenv("XIAOMING_DATABASE_URL", "postgres://test:test@localhost:5432/testdb")
-	os.Setenv("XIAOMING_JWT_SECRET", "test-jwt-secret")
-	os.Setenv("XIAOMING_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
-	os.Setenv("XIAOMING_SESSION_TOKENS", "single-token-without-commas")
-	os.Setenv("XIAOMING_JWT_EXPIRATION", "24h")
+	os.Setenv("CHATGPT_PROXY_DATABASE_URL", "postgres://test:test@localhost:5432/testdb")
+	os.Setenv("CHATGPT_PROXY_JWT_SECRET", "test-jwt-secret")
+	os.Setenv("CHATGPT_PROXY_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
+	os.Setenv("CHATGPT_PROXY_SESSION_TOKENS", "single-token-without-commas")
+	os.Setenv("CHATGPT_PROXY_JWT_EXPIRATION", "24h")
 	defer func() {
-		os.Unsetenv("XIAOMING_DATABASE_URL")
-		os.Unsetenv("XIAOMING_JWT_SECRET")
-		os.Unsetenv("XIAOMING_ENCRYPTION_KEY")
-		os.Unsetenv("XIAOMING_SESSION_TOKENS")
-		os.Unsetenv("XIAOMING_JWT_EXPIRATION")
+		os.Unsetenv("CHATGPT_PROXY_DATABASE_URL")
+		os.Unsetenv("CHATGPT_PROXY_JWT_SECRET")
+		os.Unsetenv("CHATGPT_PROXY_ENCRYPTION_KEY")
+		os.Unsetenv("CHATGPT_PROXY_SESSION_TOKENS")
+		os.Unsetenv("CHATGPT_PROXY_JWT_EXPIRATION")
 	}()
 
 	cfg, err := Load()
@@ -119,15 +119,15 @@ func TestSessionTokensSingleToken(t *testing.T) {
 }
 
 func TestJWTExpirationRequiresDurationUnit(t *testing.T) {
-	os.Setenv("XIAOMING_DATABASE_URL", "postgres://test:test@localhost:5432/testdb")
-	os.Setenv("XIAOMING_JWT_SECRET", "test-jwt-secret")
-	os.Setenv("XIAOMING_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
-	os.Setenv("XIAOMING_JWT_EXPIRATION", "24")
+	os.Setenv("CHATGPT_PROXY_DATABASE_URL", "postgres://test:test@localhost:5432/testdb")
+	os.Setenv("CHATGPT_PROXY_JWT_SECRET", "test-jwt-secret")
+	os.Setenv("CHATGPT_PROXY_ENCRYPTION_KEY", "Z4ss+pkQgRg5xMvj+fkNsB2JD4z7hvQFrORtllXf4Wc=")
+	os.Setenv("CHATGPT_PROXY_JWT_EXPIRATION", "24")
 	defer func() {
-		os.Unsetenv("XIAOMING_DATABASE_URL")
-		os.Unsetenv("XIAOMING_JWT_SECRET")
-		os.Unsetenv("XIAOMING_ENCRYPTION_KEY")
-		os.Unsetenv("XIAOMING_JWT_EXPIRATION")
+		os.Unsetenv("CHATGPT_PROXY_DATABASE_URL")
+		os.Unsetenv("CHATGPT_PROXY_JWT_SECRET")
+		os.Unsetenv("CHATGPT_PROXY_ENCRYPTION_KEY")
+		os.Unsetenv("CHATGPT_PROXY_JWT_EXPIRATION")
 	}()
 
 	if _, err := Load(); err == nil {

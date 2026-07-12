@@ -53,13 +53,13 @@ cp .env.example .env
 编辑 `.env`，至少设置：
 
 ```env
-XIAOMING_DATABASE_URL=postgres://chatgpt_proxy:dev_secret@localhost:5432/chatgpt_proxy?sslmode=disable
-XIAOMING_ENCRYPTION_KEY=<32-byte-base64-key>
-XIAOMING_JWT_SECRET=<random-secret>
-XIAOMING_JWT_EXPIRATION=24h
-XIAOMING_SIDECAR_URL=http://127.0.0.1:3100
-XIAOMING_CHROME_LAUNCH_MODE=cdp
-XIAOMING_CHROME_CDP_PORT=9222
+CHATGPT_PROXY_DATABASE_URL=postgres://chatgpt_proxy:dev_secret@localhost:5432/chatgpt_proxy?sslmode=disable
+CHATGPT_PROXY_ENCRYPTION_KEY=<32-byte-base64-key>
+CHATGPT_PROXY_JWT_SECRET=<random-secret>
+CHATGPT_PROXY_JWT_EXPIRATION=24h
+CHATGPT_PROXY_SIDECAR_URL=http://127.0.0.1:3100
+CHATGPT_PROXY_CHROME_LAUNCH_MODE=cdp
+CHATGPT_PROXY_CHROME_CDP_PORT=9222
 ```
 
 生成加密密钥：
@@ -68,7 +68,7 @@ XIAOMING_CHROME_CDP_PORT=9222
 openssl rand -base64 32
 ```
 
-如果本机 `5432` 已被占用，请同时修改 `XIAOMING_POSTGRES_PORT` 和 `XIAOMING_DATABASE_URL` 中的端口。
+如果本机 `5432` 已被占用，请同时修改 `CHATGPT_PROXY_POSTGRES_PORT` 和 `CHATGPT_PROXY_DATABASE_URL` 中的端口。
 
 ### 2. 启动 PostgreSQL
 
@@ -113,25 +113,45 @@ npm run dev
 
 打开 Vite 输出的本地地址（通常为 `http://127.0.0.1:5173`），注册本地账号后即可使用。后端健康检查默认为 `http://127.0.0.1:8080/api/health`。
 
+### 数据库迁移
+
+后端启动时会自动执行待应用的迁移，也可以手动执行：
+
+```sh
+make migrate-up
+```
+
+回退到指定版本（保留该版本，回退比它新的迁移）：
+
+```sh
+make migrate-down VERSION=007
+```
+
+回退所有迁移是破坏性操作，必须显式指定：
+
+```sh
+make migrate-down ALL=true
+```
+
 ## 环境变量
 
 完整配置及注释见 [.env.example](.env.example)。常用变量如下：
 
 | 变量 | 必需 | 默认值 | 用途 |
 | --- | --- | --- | --- |
-| `XIAOMING_DATABASE_URL` | 是 | 无 | PostgreSQL 连接字符串 |
-| `XIAOMING_ENCRYPTION_KEY` | 是 | 无 | 32 字节 Base64 加密密钥 |
-| `XIAOMING_JWT_SECRET` | 是 | 无 | 本地 JWT 签名密钥 |
-| `XIAOMING_JWT_EXPIRATION` | 否 | `24h` | JWT 有效期 |
-| `XIAOMING_SERVER_PORT` | 否 | `8080` | 后端监听端口 |
-| `XIAOMING_SIDECAR_URL` | 否 | `http://127.0.0.1:3100` | Sidecar 地址 |
-| `XIAOMING_CHROME_LAUNCH_MODE` | 否 | `cdp` | Chrome 启动方式：`cdp` 或 `persistent` |
-| `XIAOMING_CHROME_LOGIN_MODE` | 否 | `plain` | 首次登录方式：`plain` 或 `attached` |
-| `XIAOMING_CHROME_USER_DATA_DIR` | 否 | `sidecar/.browser-profile` | Chrome 用户数据目录 |
-| `XIAOMING_CHROME_PROFILE_DIRECTORY` | 否 | `Default` | Chrome profile 名称 |
-| `XIAOMING_CHROME_PROXY_SERVER` | 否 | 无 | Chrome 显式代理地址 |
+| `CHATGPT_PROXY_DATABASE_URL` | 是 | 无 | PostgreSQL 连接字符串 |
+| `CHATGPT_PROXY_ENCRYPTION_KEY` | 是 | 无 | 32 字节 Base64 加密密钥 |
+| `CHATGPT_PROXY_JWT_SECRET` | 是 | 无 | 本地 JWT 签名密钥 |
+| `CHATGPT_PROXY_JWT_EXPIRATION` | 否 | `24h` | JWT 有效期 |
+| `CHATGPT_PROXY_SERVER_PORT` | 否 | `8080` | 后端监听端口 |
+| `CHATGPT_PROXY_SIDECAR_URL` | 否 | `http://127.0.0.1:3100` | Sidecar 地址 |
+| `CHATGPT_PROXY_CHROME_LAUNCH_MODE` | 否 | `cdp` | Chrome 启动方式：`cdp` 或 `persistent` |
+| `CHATGPT_PROXY_CHROME_LOGIN_MODE` | 否 | `plain` | 首次登录方式：`plain` 或 `attached` |
+| `CHATGPT_PROXY_CHROME_USER_DATA_DIR` | 否 | `sidecar/.browser-profile` | Chrome 用户数据目录 |
+| `CHATGPT_PROXY_CHROME_PROFILE_DIRECTORY` | 否 | `Default` | Chrome profile 名称 |
+| `CHATGPT_PROXY_CHROME_PROXY_SERVER` | 否 | 无 | Chrome 显式代理地址 |
 
-`XIAOMING_SESSION_TOKENS` 已废弃；当前链路只使用 Sidecar Chrome 登录态。
+`CHATGPT_PROXY_SESSION_TOKENS` 已废弃；当前链路只使用 Sidecar Chrome 登录态。
 
 ## 使用说明
 
@@ -193,7 +213,7 @@ Sidecar 默认以 CDP 模式启动 Chrome。首次验证 profile 或登录态失
 2. 登录完成后退出这个 Chrome。
 3. Sidecar 会重新以 CDP 模式接管同一 profile。
 
-如果 Chrome 安装位置特殊，请设置 `XIAOMING_CHROME_EXECUTABLE_PATH`。需要回退旧模式时，可以设置 `XIAOMING_CHROME_LAUNCH_MODE=persistent`。
+如果 Chrome 安装位置特殊，请设置 `CHATGPT_PROXY_CHROME_EXECUTABLE_PATH`。需要回退旧模式时，可以设置 `CHATGPT_PROXY_CHROME_LAUNCH_MODE=persistent`。
 
 ### Cloudflare challenge
 
@@ -202,8 +222,8 @@ Sidecar 默认以 CDP 模式启动 Chrome。首次验证 profile 或登录态失
 如果验证反复出现，可以在完全退出普通 Chrome 后复用日常 profile：
 
 ```env
-XIAOMING_CHROME_USER_DATA_DIR=/Users/<you>/Library/Application Support/Google/Chrome
-XIAOMING_CHROME_PROFILE_DIRECTORY=Default
+CHATGPT_PROXY_CHROME_USER_DATA_DIR=/Users/<you>/Library/Application Support/Google/Chrome
+CHATGPT_PROXY_CHROME_PROFILE_DIRECTORY=Default
 ```
 
 不要让普通 Chrome 和 Sidecar 同时使用同一 profile，否则会发生 profile 锁冲突。
@@ -211,15 +231,15 @@ XIAOMING_CHROME_PROFILE_DIRECTORY=Default
 如果日常 Chrome 依赖本地代理，请显式配置：
 
 ```env
-XIAOMING_CHROME_PROXY_SERVER=socks5://127.0.0.1:7890
-XIAOMING_CHROME_PROXY_BYPASS_LIST=<-loopback>
+CHATGPT_PROXY_CHROME_PROXY_SERVER=socks5://127.0.0.1:7890
+CHATGPT_PROXY_CHROME_PROXY_BYPASS_LIST=<-loopback>
 ```
 
-仅在诊断 DNS/IPv6 问题时使用 `XIAOMING_CHROME_HOST_RESOLVER_RULES`；启用后 Chrome 会显示“不受支持的命令行标记”警告。
+仅在诊断 DNS/IPv6 问题时使用 `CHATGPT_PROXY_CHROME_HOST_RESOLVER_RULES`；启用后 Chrome 会显示“不受支持的命令行标记”警告。
 
 ## 可选：使用 Neon
 
-本地开发默认使用 Docker PostgreSQL，也可以将 `XIAOMING_DATABASE_URL` 指向 Neon 或其他兼容 PostgreSQL 服务。Neon 配置通常需要 `sslmode=require`；套餐限制和价格请以 [Neon 官方定价](https://neon.com/pricing) 为准。
+本地开发默认使用 Docker PostgreSQL，也可以将 `CHATGPT_PROXY_DATABASE_URL` 指向 Neon 或其他兼容 PostgreSQL 服务。Neon 配置通常需要 `sslmode=require`；套餐限制和价格请以 [Neon 官方定价](https://neon.com/pricing) 为准。
 
 ## 安全注意事项
 

@@ -7,31 +7,31 @@ import { randomUUID } from 'crypto';
 
 // ---- Configuration ----
 
-const PORT = parseInt(process.env.XIAOMING_SIDECAR_PORT || '3100', 10);
+const PORT = parseInt(process.env.CHATGPT_PROXY_SIDECAR_PORT || '3100', 10);
 const CHATGPT_URL = 'https://chatgpt.com';
 const CHROME_LAUNCH_MODE = normalizeChromeLaunchMode(
-  process.env.XIAOMING_CHROME_LAUNCH_MODE || 'cdp',
+  process.env.CHATGPT_PROXY_CHROME_LAUNCH_MODE || 'cdp',
 );
 const CHROME_LOGIN_MODE = normalizeChromeLoginMode(
-  process.env.XIAOMING_CHROME_LOGIN_MODE || 'plain',
+  process.env.CHATGPT_PROXY_CHROME_LOGIN_MODE || 'plain',
 );
-const CHROME_CDP_PORT = parseInt(process.env.XIAOMING_CHROME_CDP_PORT || '9222', 10);
-const CHROME_CHANNEL = process.env.XIAOMING_CHROME_CHANNEL || 'chrome';
-const CHROME_EXECUTABLE_PATH = process.env.XIAOMING_CHROME_EXECUTABLE_PATH || '';
-const CHROME_USER_DATA_DIR = process.env.XIAOMING_CHROME_USER_DATA_DIR || '';
-const CHROME_PROFILE_DIRECTORY = process.env.XIAOMING_CHROME_PROFILE_DIRECTORY || '';
-const CHROME_PROXY_SERVER = process.env.XIAOMING_CHROME_PROXY_SERVER || '';
-const CHROME_PROXY_BYPASS_LIST = process.env.XIAOMING_CHROME_PROXY_BYPASS_LIST || '';
-const CHROME_HOST_RESOLVER_RULES = process.env.XIAOMING_CHROME_HOST_RESOLVER_RULES || '';
-const CHROME_BYPASS_CSP = process.env.XIAOMING_CHROME_BYPASS_CSP === 'true';
-const LOGIN_TIMEOUT_MS = parseInt(process.env.XIAOMING_LOGIN_TIMEOUT_MS || '900000', 10);
+const CHROME_CDP_PORT = parseInt(process.env.CHATGPT_PROXY_CHROME_CDP_PORT || '9222', 10);
+const CHROME_CHANNEL = process.env.CHATGPT_PROXY_CHROME_CHANNEL || 'chrome';
+const CHROME_EXECUTABLE_PATH = process.env.CHATGPT_PROXY_CHROME_EXECUTABLE_PATH || '';
+const CHROME_USER_DATA_DIR = process.env.CHATGPT_PROXY_CHROME_USER_DATA_DIR || '';
+const CHROME_PROFILE_DIRECTORY = process.env.CHATGPT_PROXY_CHROME_PROFILE_DIRECTORY || '';
+const CHROME_PROXY_SERVER = process.env.CHATGPT_PROXY_CHROME_PROXY_SERVER || '';
+const CHROME_PROXY_BYPASS_LIST = process.env.CHATGPT_PROXY_CHROME_PROXY_BYPASS_LIST || '';
+const CHROME_HOST_RESOLVER_RULES = process.env.CHATGPT_PROXY_CHROME_HOST_RESOLVER_RULES || '';
+const CHROME_BYPASS_CSP = process.env.CHATGPT_PROXY_CHROME_BYPASS_CSP === 'true';
+const LOGIN_TIMEOUT_MS = parseInt(process.env.CHATGPT_PROXY_LOGIN_TIMEOUT_MS || '900000', 10);
 const LOGIN_POLL_INTERVAL_MS = 5000; // 5 seconds
 const LOGIN_API_CHECK_INTERVAL_MS = 15_000;
 const CDP_STARTUP_TIMEOUT_MS = 20_000;
 const CHALLENGE_OPEN_THROTTLE_MS = 30_000;
-const SENTINEL_CACHE_TTL_MS = parseInt(process.env.XIAOMING_SENTINEL_CACHE_TTL || '300', 10) * 1000;
+const SENTINEL_CACHE_TTL_MS = parseInt(process.env.CHATGPT_PROXY_SENTINEL_CACHE_TTL || '300', 10) * 1000;
 const BROWSER_AUTH_CACHE_TTL_MS = parseInt(
-  process.env.XIAOMING_BROWSER_AUTH_CACHE_TTL_MS || '60000',
+  process.env.CHATGPT_PROXY_BROWSER_AUTH_CACHE_TTL_MS || '60000',
   10,
 );
 
@@ -160,13 +160,13 @@ interface ExpandedDeltaOperation {
 
 function normalizeChromeLaunchMode(value: string): ChromeLaunchMode {
   if (value === 'persistent' || value === 'cdp') return value;
-  console.warn(`[sidecar] Unknown XIAOMING_CHROME_LAUNCH_MODE=${value}; using cdp.`);
+  console.warn(`[sidecar] Unknown CHATGPT_PROXY_CHROME_LAUNCH_MODE=${value}; using cdp.`);
   return 'cdp';
 }
 
 function normalizeChromeLoginMode(value: string): ChromeLoginMode {
   if (value === 'plain' || value === 'attached') return value;
-  console.warn(`[sidecar] Unknown XIAOMING_CHROME_LOGIN_MODE=${value}; using plain.`);
+  console.warn(`[sidecar] Unknown CHATGPT_PROXY_CHROME_LOGIN_MODE=${value}; using plain.`);
   return 'plain';
 }
 
@@ -278,7 +278,7 @@ function resolveChromeExecutablePath(): string {
   if (candidate) return candidate;
 
   throw new Error(
-    'Google Chrome executable not found. Set XIAOMING_CHROME_EXECUTABLE_PATH to the Chrome Stable executable path.',
+    'Google Chrome executable not found. Set CHATGPT_PROXY_CHROME_EXECUTABLE_PATH to the Chrome Stable executable path.',
   );
 }
 

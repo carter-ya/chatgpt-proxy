@@ -16,7 +16,7 @@ vet:
 	go vet ./...
 
 migrate-up:
-	@echo "migrate-up 将在后续 worker 中实现"
+	go run ./backend/cmd/migrate up
 
 migrate-down:
-	@echo "migrate-down 将在后续 worker 中实现"
+	go run ./backend/cmd/migrate down $(VERSION) $(if $(filter true,$(ALL)),--all,)

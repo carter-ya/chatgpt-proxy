@@ -15,6 +15,26 @@ import (
 // RunMigrations reads SQL migration files from the embedded migrations
 // filesystem and executes them against the given PostgreSQL database.
 func RunMigrations(dbURL string) error {
+	return runMigration(dbURL, func(svc *migrate.Service) error {
+		if err := svc.Up(); err != nil {
+			return fmt.Errorf("run migrations: %w", err)
+		}
+		return nil
+	})
+}
+
+// RollbackMigrations rolls back every applied migration newer than toVersion.
+// When all is true, every applied migration is rolled back and toVersion is ignored.
+func RollbackMigrations(dbURL, toVersion string, all bool) error {
+	return runMigration(dbURL, func(svc *migrate.Service) error {
+		if err := svc.Down(toVersion, all); err != nil {
+			return fmt.Errorf("rollback migrations: %w", err)
+		}
+		return nil
+	})
+}
+
+func runMigration(dbURL string, action func(*migrate.Service) error) error {
 	ctx := context.Background()
 
 	db, err := sql.Open("pgx", dbURL)
@@ -38,9 +58,5 @@ func RunMigrations(dbURL string) error {
 		return fmt.Errorf("create schema history: %w", err)
 	}
 
-	if err := svc.Up(); err != nil {
-		return fmt.Errorf("run migrations: %w", err)
-	}
-
-	return nil
+	return action(svc)
 }

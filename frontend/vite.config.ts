@@ -22,9 +22,9 @@ function resolveServerPort(): number {
       // 文件不存在或无法读取，继续尝试后续来源。
     }
   }
-  // 2. 降级到环境变量 XIAOMING_SERVER_PORT
-  if (process.env.XIAOMING_SERVER_PORT) {
-    const port = parseInt(process.env.XIAOMING_SERVER_PORT, 10);
+  // 2. 降级到环境变量 CHATGPT_PROXY_SERVER_PORT
+  if (process.env.CHATGPT_PROXY_SERVER_PORT) {
+    const port = parseInt(process.env.CHATGPT_PROXY_SERVER_PORT, 10);
     if (!isNaN(port) && port > 0 && port <= 65535) {
       return port;
     }

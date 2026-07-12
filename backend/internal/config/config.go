@@ -50,14 +50,14 @@ func Load() (*Config, error) {
 	// 自动加载项目根目录的 .env 文件。
 	// godotenv.Load 在变量已存在时不会覆盖，因此显式设置的环境变量（如 targets.json 的 env 块）
 	// 优先于 .env 中的值，.env 仅作为回退默认值。
-	loadEnvFile()
+	LoadEnvFile()
 
 	v := viper.New()
-	v.SetEnvPrefix("XIAOMING")
+	v.SetEnvPrefix("CHATGPT_PROXY")
 	v.AutomaticEnv()
 
 	// 显式绑定每个 Config 字段的环境变量，确保 AutomaticEnv + SetEnvPrefix
-	// 在 Unmarshal 时能正确将 XIAOMING_* 环境变量映射到 mapstructure 字段。
+	// 在 Unmarshal 时能正确将 CHATGPT_PROXY_* 环境变量映射到 mapstructure 字段。
 	// 仅靠 AutomaticEnv 在某些 viper 版本中不会自动绑定带前缀的 key。
 	v.BindEnv("server_port")
 	v.BindEnv("database_url")
@@ -84,7 +84,7 @@ func Load() (*Config, error) {
 	// 自动转换为 []string。go-default 的 default:"" 会将 []string 设为 []string{""}
 	// 而非 nil，因此不能再依赖 len(cfg.SessionTokens)==0 做守卫。
 	// 始终从 os.Getenv 读取并回填。
-	if tokenEnv := os.Getenv("XIAOMING_SESSION_TOKENS"); tokenEnv != "" {
+	if tokenEnv := os.Getenv("CHATGPT_PROXY_SESSION_TOKENS"); tokenEnv != "" {
 		// 按逗号分割以支持多个 token，同时过滤空字符串。
 		rawTokens := strings.Split(tokenEnv, ",")
 		var tokens []string
@@ -107,10 +107,10 @@ func Load() (*Config, error) {
 	// 但 DatabaseURL 没有 required tag，且使用 default:"" 仅为语义占位。
 	// 显式检查确保缺失关键配置时输出清晰的错误信息。
 	if cfg.DatabaseURL == "" {
-		return nil, fmt.Errorf("config: 配置项 XIAOMING_DATABASE_URL 不能为空")
+		return nil, fmt.Errorf("config: 配置项 CHATGPT_PROXY_DATABASE_URL 不能为空")
 	}
 	if cfg.JWTSecret == "" {
-		return nil, fmt.Errorf("config: 配置项 XIAOMING_JWT_SECRET 不能为空")
+		return nil, fmt.Errorf("config: 配置项 CHATGPT_PROXY_JWT_SECRET 不能为空")
 	}
 
 	return &cfg, nil
@@ -118,7 +118,9 @@ func Load() (*Config, error) {
 
 // loadEnvFile 尝试从项目根目录加载 .env 文件。
 // 使用 godotenv.Load 在变量未设置时注入，已存在的环境变量不会被覆盖。
-func loadEnvFile() {
+// LoadEnvFile loads the project-root .env file without overriding variables
+// that are already present in the process environment.
+func LoadEnvFile() {
 	root, err := findProjectRoot()
 	if err != nil {
 		log.Printf("未能定位项目根目录，跳过自动加载 .env: %v", err)

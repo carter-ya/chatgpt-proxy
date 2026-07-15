@@ -11,7 +11,8 @@
 - 按用户隔离会话、上传文件和生成图片
 - ChatGPT 流式回复、思考进度、思考摘要和搜索来源
 - 动态读取当前 ChatGPT 账号可用的模型与思考档位
-- 多文件点击、拖放和粘贴上传，单文件上限 50 MB
+- 多文件点击、拖放和粘贴流式上传，单文件上限 50 MB
+- 文件与 Sandbox 产物通过浏览器原生流式下载，支持 Range 断点续传
 - 独立 Images 工作区，支持图片生成、候选选择和引用编辑
 - 会话历史、快速标题、归档、恢复和永久删除
 - Markdown、表格、代码高亮、代码复制和搜索图片组渲染
@@ -150,14 +151,13 @@ make migrate-down ALL=true
 | `CHATGPT_PROXY_CHROME_USER_DATA_DIR` | 否 | `sidecar/.browser-profile` | Chrome 用户数据目录 |
 | `CHATGPT_PROXY_CHROME_PROFILE_DIRECTORY` | 否 | `Default` | Chrome profile 名称 |
 | `CHATGPT_PROXY_CHROME_PROXY_SERVER` | 否 | 无 | Chrome 显式代理地址 |
-
-`CHATGPT_PROXY_SESSION_TOKENS` 已废弃；当前链路只使用 Sidecar Chrome 登录态。
+| `CHATGPT_PROXY_FINAL_RESPONSE_TIMEOUT_MS` | 否 | `900000` | 长任务最终结果轮询时间（毫秒） |
 
 ## 使用说明
 
 ### 普通聊天
 
-聊天输入框会从 Sidecar 当前登录账号动态读取模型和思考档位。回复支持流式文本、Markdown、代码块、搜索来源和图片组。新会话会在创建后立即出现在侧栏，稍后自动替换为 ChatGPT 生成的正式标题。
+聊天输入框会从 Sidecar 当前登录账号动态读取模型和思考档位。选中的模型会按本地用户保存，并在聊天页、图片页和页面刷新后复用；若该选项已下线，会自动回退到新模型列表的默认模型。回复支持流式文本、Markdown、代码块、搜索来源和图片组。新会话会在创建后立即出现在侧栏，稍后自动替换为 ChatGPT 生成的正式标题。
 
 ### Images 工作区
 
@@ -166,6 +166,10 @@ make migrate-down ALL=true
 ### 多用户资源隔离
 
 所有本地用户共享一个 Sidecar ChatGPT 账号，但后端会按 JWT 中的 `user_id` 隔离会话和文件。新会话在 SSE 返回 `conversation_id` 时绑定当前用户；未知的上游资源不会自动认领，归属检查失败时请求会被拒绝。
+
+### 文件传输
+
+上传文件会从 multipart 请求直接流向上游签名存储，后端保留 50 MB 限制、MIME 判断和图片宽高检测，但不会完整载入内存。下载时，前端先使用 JWT 申请一个与用户和资源绑定、10 分钟有效的加密票据，再交由浏览器原生下载。文件内容会从 Chrome Sidecar 经 Go 后端逐块转发，不会完整载入 Sidecar、后端或前端内存；`Range` 和 `If-Range` 请求头以及对应的响应头会沿链路透传。
 
 ## 测试与构建
 
@@ -183,6 +187,7 @@ Sidecar：
 
 ```sh
 cd sidecar
+npm test
 npm run build
 ```
 
@@ -217,7 +222,7 @@ Sidecar 默认以 CDP 模式启动 Chrome。首次验证 profile 或登录态失
 
 ### Cloudflare challenge
 
-如果 Chrome 出现 Cloudflare challenge，请在可见窗口中手动完成。不要关闭 Sidecar 管理的 Chrome；CDP 断开后，上游接口会返回 503。
+如果 Chrome 出现 Cloudflare challenge，请在可见窗口中手动完成。Sidecar 会巡检 CDP 连接；Chrome 或代理页意外关闭后会自动重连，必要时重新拉起 Chrome。登录态失效时仍需在打开的窗口中手动完成登录或验证。
 
 如果验证反复出现，可以在完全退出普通 Chrome 后复用日常 profile：
 

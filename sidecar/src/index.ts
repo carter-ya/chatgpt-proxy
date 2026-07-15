@@ -1,9 +1,11 @@
 import express, { type Request, type Response } from 'express';
 import { spawn, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Disposable, type Page } from 'playwright';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
+import { BrowserRecoveryController } from './browserRecovery.js';
+import { startRawResponse, writeRawChunk } from './rawStreamBridge.js';
 
 // ---- Configuration ----
 
@@ -28,11 +30,17 @@ const LOGIN_TIMEOUT_MS = parseInt(process.env.CHATGPT_PROXY_LOGIN_TIMEOUT_MS || 
 const LOGIN_POLL_INTERVAL_MS = 5000; // 5 seconds
 const LOGIN_API_CHECK_INTERVAL_MS = 15_000;
 const CDP_STARTUP_TIMEOUT_MS = 20_000;
+const BROWSER_RECOVERY_WAIT_MS = 20_000;
+const BROWSER_WATCHDOG_INTERVAL_MS = 10_000;
 const CHALLENGE_OPEN_THROTTLE_MS = 30_000;
 const SENTINEL_CACHE_TTL_MS = parseInt(process.env.CHATGPT_PROXY_SENTINEL_CACHE_TTL || '300', 10) * 1000;
 const BROWSER_AUTH_CACHE_TTL_MS = parseInt(
   process.env.CHATGPT_PROXY_BROWSER_AUTH_CACHE_TTL_MS || '60000',
   10,
+);
+const FINAL_RESPONSE_POLL_TIMEOUT_MS = Math.max(
+  30_000,
+  parseInt(process.env.CHATGPT_PROXY_FINAL_RESPONSE_TIMEOUT_MS || '900000', 10) || 900_000,
 );
 
 // ---- Global State ----
@@ -43,6 +51,12 @@ let proxyPage: Page | null = null;
 let isReady = false;
 let readyError: string | null = null;
 let lastChallengeOpenAt = 0;
+let streamChunkBinding: Disposable | null = null;
+let rawStreamBinding: Disposable | null = null;
+let recoveryController: BrowserRecoveryController | null = null;
+let browserWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+let browserWatchdogRunning = false;
+let shuttingDown = false;
 
 // Track active SSE streams so the exposed browser callback can route chunks
 // to the correct Express response.
@@ -87,10 +101,39 @@ interface StreamImageGroup {
 
 const activeStreams = new Map<string, StreamState>();
 
+interface RawStreamState {
+  res: Response;
+}
+
+const activeRawStreams = new Map<string, RawStreamState>();
+
 function deleteActiveStream(streamId: string): void {
   const state = activeStreams.get(streamId);
   if (state) clearInterval(state.heartbeat);
   activeStreams.delete(streamId);
+}
+
+function failActiveStreams(message: string): void {
+  for (const [streamId, state] of activeStreams) {
+    if (!state.res.writableEnded) {
+      state.res.write(`event: error\ndata: ${message}\n\n`);
+      state.res.end();
+    }
+    deleteActiveStream(streamId);
+  }
+}
+
+function deleteActiveRawStream(streamId: string): void {
+  activeRawStreams.delete(streamId);
+}
+
+function failActiveRawStreams(message: string): void {
+  for (const [streamId, state] of activeRawStreams) {
+    if (!state.res.destroyed && !state.res.writableEnded) {
+      state.res.destroy(new Error(message));
+    }
+    deleteActiveRawStream(streamId);
+  }
 }
 
 // Sentinel token cache — pre-fetched on startup, refreshed every 5 minutes.
@@ -455,14 +498,22 @@ async function waitForCdp(port: number, timeoutMs: number, getSpawnError: () => 
 }
 
 function markReadyBrowserUnavailable(message: string): void {
-  if (!isReady) {
-    readyError = message;
-    return;
-  }
-
+  const wasReady = isReady;
   isReady = false;
   readyError = message;
-  console.warn(`[sidecar] ${message}`);
+  clearBrowserAuthCache();
+  if (wasReady) {
+    failActiveStreams(message);
+    failActiveRawStreams(message);
+    console.warn(`[sidecar] ${message}`);
+  }
+}
+
+function reportBrowserUnavailable(message: string): void {
+  markReadyBrowserUnavailable(message);
+  if (!shuttingDown) {
+    void recoveryController?.request(message);
+  }
 }
 
 async function handleCdpChromeExit(
@@ -488,13 +539,13 @@ async function handleCdpChromeExit(
       return;
     }
 
-    markReadyBrowserUnavailable(
+    reportBrowserUnavailable(
       'Chrome was closed; leave the sidecar Chrome window open while using proxy mode.',
     );
     return;
   }
 
-  markReadyBrowserUnavailable(`Chrome exited unexpectedly (code=${code}, signal=${signal})`);
+  reportBrowserUnavailable(`Chrome exited unexpectedly (code=${code}, signal=${signal})`);
 }
 
 function spawnCdpChrome(executablePath: string, userDataDir: string, port: number): {
@@ -643,7 +694,7 @@ async function launchCdpBrowserSession(userDataDir: string): Promise<BrowserSess
         return;
       }
 
-      markReadyBrowserUnavailable(
+      reportBrowserUnavailable(
         'Chrome CDP connection disconnected; leave the sidecar Chrome window open while using proxy mode.',
       );
     });
@@ -706,6 +757,14 @@ async function resetBrowserSession(): Promise<void> {
   proxyPage = null;
   isReady = false;
   readyError = null;
+  if (streamChunkBinding) {
+    await streamChunkBinding.dispose().catch(() => undefined);
+    streamChunkBinding = null;
+  }
+  if (rawStreamBinding) {
+    await rawStreamBinding.dispose().catch(() => undefined);
+    rawStreamBinding = null;
+  }
   await closeBrowserSession(session);
 }
 
@@ -943,6 +1002,19 @@ async function openProxyBrowser(userDataDir: string): Promise<Page> {
   return proxyPage;
 }
 
+function watchBrowserLifecycle(session: BrowserSession, page: Page): void {
+  session.context.once('close', () => {
+    if (browserSession === session && isReady) {
+      reportBrowserUnavailable('Chrome browser context closed; recovery is starting.');
+    }
+  });
+  page.once('close', () => {
+    if (proxyPage === page && isReady) {
+      reportBrowserUnavailable('ChatGPT proxy page closed; recovery is starting.');
+    }
+  });
+}
+
 async function initializeBrowser(): Promise<void> {
   const userDataDir = resolveChromeUserDataDir();
   console.log(`[sidecar] Browser profile directory: ${userDataDir}`);
@@ -992,7 +1064,7 @@ async function initializeBrowser(): Promise<void> {
 
   // Expose the stream-chunk callback into the browser page.
   // The browser side calls this with (streamId, chunk, done) for each SSE chunk.
-  await page.exposeFunction(
+  streamChunkBinding = await page.exposeFunction(
     '__sidecarStreamChunk',
     (streamId: string, chunk: string, done: boolean) => {
       const state = activeStreams.get(streamId);
@@ -1010,6 +1082,39 @@ async function initializeBrowser(): Promise<void> {
     },
   );
 
+  rawStreamBinding = await page.exposeFunction(
+    '__sidecarRawStreamEvent',
+    async (streamId: string, event: { type: string; status?: number; headers?: Record<string, string>; chunk?: string; error?: string }) => {
+      const state = activeRawStreams.get(streamId);
+      if (!state || state.res.destroyed || state.res.writableEnded) return false;
+      switch (event.type) {
+      case 'start':
+        return startRawResponse(state.res, event.status || 502, event.headers || {});
+      case 'chunk':
+        return writeRawChunk(state.res, event.chunk || '');
+      case 'done':
+        state.res.end();
+        deleteActiveRawStream(streamId);
+        return true;
+      case 'error':
+        if (!state.res.headersSent) {
+          state.res.status(502).json({ error: event.error || 'Raw stream failed' });
+        } else {
+          state.res.destroy(new Error(event.error || 'Raw stream failed'));
+        }
+        deleteActiveRawStream(streamId);
+        return false;
+      default:
+        return false;
+      }
+    },
+  );
+
+  if (!browserSession) {
+    throw new Error('Browser session disappeared during initialization');
+  }
+  watchBrowserLifecycle(browserSession, page);
+  readyError = null;
   isReady = true;
   console.log('[sidecar] Browser ready — accepting proxy requests.');
 
@@ -1033,6 +1138,43 @@ async function initializeBrowser(): Promise<void> {
   //     );
   //   });
   // }, 5 * 60 * 1000);
+}
+
+async function recoverBrowser(): Promise<void> {
+  if (shuttingDown) return;
+  await resetBrowserSession();
+  if (shuttingDown) return;
+  await initializeBrowser();
+  if (shuttingDown) await resetBrowserSession();
+}
+
+async function inspectBrowserHealth(): Promise<void> {
+  if (shuttingDown || !isReady) return;
+  const session = browserSession;
+  const page = proxyPage;
+  if (!session || !page || page.isClosed()) {
+    reportBrowserUnavailable('Browser session or proxy page is no longer available.');
+    return;
+  }
+  if (session.mode !== 'cdp') return;
+  if (!session.browser?.isConnected()) {
+    reportBrowserUnavailable('Chrome CDP browser connection is no longer active.');
+    return;
+  }
+  if (!await readCdpVersion(CHROME_CDP_PORT)) {
+    reportBrowserUnavailable('Chrome CDP endpoint is unreachable; recovery is starting.');
+  }
+}
+
+function startBrowserWatchdog(): void {
+  if (browserWatchdogTimer) return;
+  browserWatchdogTimer = setInterval(() => {
+    if (browserWatchdogRunning) return;
+    browserWatchdogRunning = true;
+    void inspectBrowserHealth()
+      .catch((err) => console.warn('[sidecar] Browser watchdog failed:', err))
+      .finally(() => { browserWatchdogRunning = false; });
+  }, BROWSER_WATCHDOG_INTERVAL_MS);
 }
 
 // ---- Sentinel Token Helpers ----
@@ -2362,6 +2504,101 @@ async function handleNonStreamProxy(
   res.json(responsePayload);
 }
 
+/** Raw binary proxy: streams response bytes from the browser to Node in
+ * bounded base64 chunks. The exposed callback awaits Node's drain event, so
+ * backpressure propagates all the way to the browser ReadableStream. */
+async function handleRawStreamProxy(
+  page: Page,
+  method: string,
+  upstreamPath: string,
+  headers: Record<string, string>,
+  body: string | undefined,
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const streamId = randomUUID();
+  const isExternalUrl = /^https?:\/\//i.test(upstreamPath);
+  if (isExternalUrl) {
+    deleteHeader(headers, 'authorization');
+  } else {
+    await applyBrowserAuthHeaders(page, headers);
+  }
+
+  activeRawStreams.set(streamId, { res });
+  res.once('close', () => deleteActiveRawStream(streamId));
+
+  try {
+    const result = await page.evaluate(
+      async ({ streamId: id, url, method: requestMethod, headers: requestHeaders, bodyBase64 }) => {
+        const callback = (window as any).__sidecarRawStreamEvent as (
+          streamId: string,
+          event: { type: string; status?: number; headers?: Record<string, string>; chunk?: string; error?: string },
+        ) => Promise<boolean>;
+        const bytesToBase64 = (bytes: Uint8Array): string => {
+          let binary = '';
+          for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+            const chunk = bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length));
+            binary += String.fromCharCode(...chunk);
+          }
+          return btoa(binary);
+        };
+        try {
+          const options: RequestInit = {
+            method: requestMethod || 'GET',
+            headers: requestHeaders || {},
+            credentials: 'include' as RequestCredentials,
+          };
+          if (bodyBase64 && requestMethod !== 'GET' && requestMethod !== 'HEAD') {
+            const binary = atob(bodyBase64);
+            const requestBytes = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index++) requestBytes[index] = binary.charCodeAt(index);
+            options.body = requestBytes;
+          }
+          const response = await fetch(url, options);
+          const responseHeaders: Record<string, string> = {};
+          response.headers.forEach((value, key) => { responseHeaders[key] = value; });
+          const cfChallenge = response.headers.get('cf-mitigated') === 'challenge';
+          if (!await callback(id, { type: 'start', status: response.status, headers: responseHeaders })) {
+            await response.body?.cancel();
+            return { cfChallenge };
+          }
+          const reader = response.body?.getReader();
+          if (reader) {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              for (let offset = 0; offset < value.length; offset += 64 * 1024) {
+                const chunk = value.subarray(offset, Math.min(offset + 64 * 1024, value.length));
+                if (!await callback(id, { type: 'chunk', chunk: bytesToBase64(chunk) })) {
+                  await reader.cancel();
+                  return { cfChallenge };
+                }
+              }
+            }
+          }
+          await callback(id, { type: 'done' });
+          return { cfChallenge };
+        } catch (error: any) {
+          await callback(id, { type: 'error', error: error?.message || String(error) });
+          return { cfChallenge: false };
+        }
+      },
+      { streamId, url: upstreamPath, method, headers, bodyBase64: body },
+    );
+    if (result.cfChallenge) await openCloudflareChallengePage(page, upstreamPath);
+  } catch (error) {
+    const state = activeRawStreams.get(streamId);
+    if (state && !state.res.destroyed && !state.res.writableEnded) {
+      if (!state.res.headersSent) {
+        state.res.status(502).json({ error: 'Raw stream failed', detail: String(error) });
+      } else {
+        state.res.destroy(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    deleteActiveRawStream(streamId);
+  }
+}
+
 /** Streaming SSE proxy: evaluate fetch() in browser, relay chunks via exposed callback. */
 async function handleStreamProxy(
   page: Page,
@@ -2458,7 +2695,7 @@ async function handleStreamProxy(
   // __sidecarStreamChunk for each chunk.
   page
     .evaluate(
-      async ({ method, path: p, headers: hdrs, body: b, streamId: sid, imageMode }) => {
+      async ({ method, path: p, headers: hdrs, body: b, streamId: sid, imageMode, finalPollTimeoutMs }) => {
         const win = window as any;
         // page.evaluate runs in the browser realm and cannot close over helper
         // functions declared in the Node/sidecar realm. Keep final-snapshot
@@ -2694,8 +2931,9 @@ async function handleStreamProxy(
               let finalSnapshotSent = false;
               let lastAsyncStatusError = '';
               let lastDetailError = '';
-              const maxPollAttempts = imageMode ? 165 : 30;
-              for (let attempt = 0; attempt < maxPollAttempts; attempt++) {
+              let lastProgressUpdateAt = 0;
+              const pollStartedAt = Date.now();
+              while (Date.now() - pollStartedAt < finalPollTimeoutMs) {
                 const authEntry = Object.entries(hdrs || {}).find(
                   ([key]) => key.toLowerCase() === 'authorization',
                 );
@@ -2839,6 +3077,14 @@ async function handleStreamProxy(
                 } else {
                   lastDetailError = `HTTP ${detailResp.status}: ${(await detailResp.text().catch(() => '')).slice(0, 200)}`;
                 }
+                if (Date.now() - lastProgressUpdateAt >= 10_000) {
+                  await win.__sidecarStreamChunk(
+                    sid,
+                    `data: ${JSON.stringify({ status: imageMode ? '图片仍在生成，请稍候…' : '正在等待完整响应，请稍候…' })}\n\n`,
+                    false,
+                  );
+                  lastProgressUpdateAt = Date.now();
+                }
                 await new Promise((resolve) => setTimeout(resolve, 1000));
               }
               if (!finalSnapshotSent) {
@@ -2846,9 +3092,10 @@ async function handleStreamProxy(
                   lastAsyncStatusError && `async-status ${lastAsyncStatusError}`,
                   lastDetailError && `conversation detail ${lastDetailError}`,
                 ].filter(Boolean).join('; ');
+                console.warn(`Final response polling timed out${details ? `: ${details}` : ''}`);
                 await win.__sidecarStreamChunk(
                   sid,
-                  `event: error\ndata: ${imageMode ? 'Timed out waiting for the current image generation to finish' : 'Timed out waiting for the completed response'}${details ? `: ${details}` : ''}\n\n`,
+                  `event: error\ndata: ${imageMode ? '图片生成时间较长，结果可能仍在处理中。请稍后重新打开此对话查看，或点击重试。' : '响应时间较长，结果可能仍在处理中。请稍后重新打开此对话查看，或点击重试。'}\n\n`,
                   false,
                 );
               }
@@ -2877,6 +3124,7 @@ async function handleStreamProxy(
         body: decodedBody,
         streamId,
         imageMode: decodedBody?.includes('"picture_v2"') ?? false,
+        finalPollTimeoutMs: FINAL_RESPONSE_POLL_TIMEOUT_MS,
       },
     )
     .then((result) => {
@@ -2908,7 +3156,6 @@ function startServer(): void {
 
   // Parse JSON bodies — the outer envelope is JSON; the inner "body" field
   // is a pre-serialized string that we pass through untouched.
-  // Base64 adds roughly 33% overhead to the 50 MB upload limit.
   app.use(express.json({ limit: '70mb' }));
 
   // ---- GET /health ----
@@ -2923,11 +3170,23 @@ function startServer(): void {
   // ---- POST /api/proxy ----
   app.post('/api/proxy', async (req: Request, res: Response) => {
     if (!isReady || !proxyPage) {
-      res.status(503).json({ error: 'Sidecar not ready' });
-      return;
+      if (isReady && !proxyPage) {
+        reportBrowserUnavailable('Proxy page is missing; recovery is starting.');
+      }
+      const recovered = await recoveryController?.ensureReady(
+        'Proxy request arrived while the browser was unavailable.',
+        BROWSER_RECOVERY_WAIT_MS,
+      );
+      if (!recovered || !isReady || !proxyPage) {
+        res.setHeader('Retry-After', '5');
+        res.status(503).json({ error: readyError || 'Sidecar browser recovery is still in progress' });
+        return;
+      }
     }
 
-    const isStream = req.query.stream === 'true';
+    const page = proxyPage;
+
+    const streamMode = typeof req.query.stream === 'string' ? req.query.stream : '';
     const { method, path: upstreamPath, headers, body } = req.body as ProxyRequestBody;
 
     if (!upstreamPath) {
@@ -2936,10 +3195,20 @@ function startServer(): void {
     }
 
     try {
-      if (isStream) {
+      if (streamMode === 'true') {
         await handleStreamProxy(
-          proxyPage,
+          page,
           method || 'POST',
+          upstreamPath,
+          headers || {},
+          body,
+          req,
+          res,
+        );
+      } else if (streamMode === 'raw') {
+        await handleRawStreamProxy(
+          page,
+          method || 'GET',
           upstreamPath,
           headers || {},
           body,
@@ -2948,7 +3217,7 @@ function startServer(): void {
         );
       } else {
         await handleNonStreamProxy(
-          proxyPage,
+          page,
           method || 'POST',
           upstreamPath,
           headers || {},
@@ -2991,6 +3260,23 @@ async function main(): Promise<void> {
     );
   }
 
+  recoveryController = new BrowserRecoveryController({
+    recover: recoverBrowser,
+    isReady: () => isReady && Boolean(proxyPage),
+    onAttempt: ({ attempt, reason }) => {
+      readyError = `Browser recovery attempt ${attempt}: ${reason}`;
+      console.log(`[sidecar] ${readyError}`);
+    },
+    onFailure: ({ attempt, error }) => {
+      readyError = `Browser recovery attempt ${attempt} failed: ${error instanceof Error ? error.message : String(error)}`;
+      console.warn(`[sidecar] ${readyError}`);
+    },
+    onRecovered: ({ attempt }) => {
+      readyError = null;
+      console.log(`[sidecar] Browser recovery succeeded on attempt ${attempt}.`);
+    },
+  });
+
   try {
     await initializeBrowser();
   } catch (err) {
@@ -3000,19 +3286,29 @@ async function main(): Promise<void> {
   }
 
   startServer();
+  startBrowserWatchdog();
+  if (!isReady) {
+    void recoveryController.request(readyError || 'Initial browser setup did not complete.');
+  }
 }
 
 // Graceful shutdown
 async function shutdown(): Promise<void> {
   console.log('[sidecar] Shutting down...');
+  shuttingDown = true;
+  recoveryController?.stop();
+  recoveryController = null;
+  if (browserWatchdogTimer) {
+    clearInterval(browserWatchdogTimer);
+    browserWatchdogTimer = null;
+  }
   if (sentinelRefreshTimer) {
     clearInterval(sentinelRefreshTimer);
     sentinelRefreshTimer = null;
   }
-  await closeBrowserSession(browserSession);
-  browserSession = null;
-  browserContext = null;
-  proxyPage = null;
+  failActiveStreams('Sidecar is shutting down.');
+  failActiveRawStreams('Sidecar is shutting down.');
+  await resetBrowserSession();
 }
 
 process.on('SIGINT', async () => {

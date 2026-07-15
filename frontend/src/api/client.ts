@@ -39,9 +39,14 @@ function getAuthHeaders() {
   return headers;
 }
 
+export interface AuthUser {
+  id?: string;
+  email: string;
+}
+
 export interface LoginResponse {
   token: string;
-  user: { email: string };
+  user: AuthUser;
 }
 
 export interface Conversation {
@@ -105,6 +110,29 @@ export interface FileAsset {
 export type UploadedFile = FileAsset;
 
 const fileBlobCache = new Map<string, Promise<Blob>>();
+
+interface DownloadTicketResponse {
+  download_url: string;
+  expires_at: string;
+}
+
+function triggerNativeDownload(downloadPath: string) {
+  const base = API_BASE.replace(/\/$/, '');
+  const relativePath = downloadPath.replace(/^\//, '');
+  const href = /^https?:\/\//i.test(downloadPath) ? downloadPath : `${base}/${relativePath}`;
+  const link = document.createElement('a');
+  link.href = href;
+  link.rel = 'noreferrer';
+  link.style.display = 'none';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+async function createDownloadTicket(payload: Record<string, string>): Promise<void> {
+  const response = await apiClient.post<DownloadTicketResponse>('/download-tickets', payload);
+  triggerNativeDownload(response.data.download_url);
+}
 
 export interface ModelOption {
   label: string;
@@ -204,10 +232,20 @@ export const chat = {
     body: JSON.stringify({ assistant_message_id: assistantMessageId, model, thinking_effort: thinkingEffort }),
   }),
 
-  uploadFile: async (file: File): Promise<UploadedFile> => {
+  uploadFile: async (file: File, onProgress?: (percentage: number) => void): Promise<UploadedFile> => {
     const formData = new FormData();
     formData.append('file', file);
-    const res = await apiClient.post<UploadedFile>('/files', formData);
+    const res = await apiClient.post<UploadedFile>('/files', formData, {
+      params: { size_bytes: file.size },
+      onUploadProgress: onProgress ? (event) => {
+        const ratio = typeof event.progress === 'number'
+          ? event.progress
+          : event.total
+            ? event.loaded / event.total
+            : 0;
+        onProgress(Math.min(100, Math.max(0, Math.round(ratio * 100))));
+      } : undefined,
+    });
     return res.data;
   },
 
@@ -229,15 +267,11 @@ export const chat = {
     return request;
   },
 
-  downloadFile: async (file: Pick<FileAsset, 'download_url' | 'file_name'>) => {
-    const blob = await chat.getFileBlob(file);
-    const objectURL = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = objectURL;
-    link.download = file.file_name;
-    link.click();
-    URL.revokeObjectURL(objectURL);
-  },
+  downloadFile: async (file: Pick<FileAsset, 'file_id'>) =>
+    createDownloadTicket({ kind: 'file', file_id: file.file_id }),
+
+  downloadSandboxFile: async (conversationId: string, messageId: string, sandboxPath: string) =>
+    createDownloadTicket({ kind: 'sandbox', conversation_id: conversationId, message_id: messageId, sandbox_path: sandboxPath }),
 
   listConversations: (archived = false) =>
     apiClient.get<{

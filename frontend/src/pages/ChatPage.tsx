@@ -36,6 +36,7 @@ export default function ChatPage() {
   const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [activeConversationId, setActiveConversationId] = useState(conversationId || '');
   const streamMessageRef = useRef<string | null>(null);
   const pendingConversationRef = useRef<string | null>(null);
   const startedAtRef = useRef(0);
@@ -47,6 +48,7 @@ export default function ChatPage() {
 
   const callbacksFor = useCallback((newConversation: boolean, initialMessage = '') => ({
     onConversationCreated: (id: string) => {
+      setActiveConversationId(id);
       if (!newConversation || pendingConversationRef.current === id) return;
       pendingConversationRef.current = id;
       announceConversation(id, initialMessage, 'chat');
@@ -79,6 +81,7 @@ export default function ChatPage() {
   }), [announceConversation, loadConversations, navigate, refreshConversationTitle, updateStreamingMessage]);
 
   useEffect(() => {
+    setActiveConversationId(conversationId || '');
     if (!conversationId) { setMessages([]); setLoadError(''); return; }
     setLoading(true);
     setLoadError('');
@@ -125,7 +128,7 @@ export default function ChatPage() {
       {loading ? <div className="welcome-screen"><div className="spinner" /><p>加载中...</p></div>
         : loadError ? <div className="welcome-screen"><p className="page-error">{loadError}</p></div>
           : messages.length === 0 ? <div className="welcome-screen"><h2>ChatGPT Proxy</h2><p>开始一段新的对话</p></div>
-            : <MessageList messages={messages} onRetry={handleRetry} />}
+            : <MessageList messages={messages} conversationId={activeConversationId || undefined} onRetry={handleRetry} />}
       <ChatInput onSend={handleSend} sending={sending} onCancel={cancelStream} />
     </main>
   );

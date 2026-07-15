@@ -6,14 +6,10 @@ import {
   useEffect,
   type ReactNode,
 } from 'react';
-import { auth, type LoginResponse } from '../api/client';
-
-interface User {
-  email: string;
-}
+import { auth, type AuthUser, type LoginResponse } from '../api/client';
 
 interface AuthState {
-  user: User | null;
+  user: AuthUser | null;
   token: string | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
@@ -24,7 +20,7 @@ interface AuthState {
 const AuthContext = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 

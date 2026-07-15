@@ -1,6 +1,6 @@
-import { isValidElement, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { isValidElement, useEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { dracula } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -10,6 +10,8 @@ import { chat, type FileAsset, type ImageGroup, type Source } from '../api/clien
 
 interface ChatMessageProps {
   id?: string;
+  conversationId?: string;
+  upstreamMessageId?: string;
   role: 'user' | 'assistant';
   content: string;
   images?: FileAsset[];
@@ -25,6 +27,15 @@ interface ChatMessageProps {
   onRetry?: () => void;
   onUseImage?: (image: FileAsset) => void;
   onSelectImage?: (image: FileAsset) => void;
+}
+
+function CopyIcon() {
+  return (
+    <svg className="message-copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" />
+    </svg>
+  );
 }
 
 function CodeBlock({ code, language }: { code: string; language?: string }) {
@@ -59,6 +70,36 @@ const components: Components = {
   },
 };
 
+function SandboxDownloadLink({ href, conversationId, messageId, children }: { href: string; conversationId?: string; messageId?: string; children: ReactNode }) {
+  const [state, setState] = useState<'idle' | 'loading' | 'error'>('idle');
+  const download = async (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    if (state === 'loading') return;
+    if (!conversationId || !messageId) {
+      setState('error');
+      return;
+    }
+    setState('loading');
+    try {
+      await chat.downloadSandboxFile(conversationId, messageId, href);
+      setState('idle');
+    } catch {
+      setState('error');
+    }
+  };
+  return (
+    <a href={href} onClick={(event) => void download(event)} aria-busy={state === 'loading'} className={state === 'error' ? 'sandbox-download-link error' : 'sandbox-download-link'}>
+      {children}
+      {state === 'loading' && <span className="sandbox-download-status">（下载中…）</span>}
+      {state === 'error' && <span className="sandbox-download-status" role="status">（下载失败，点击重试）</span>}
+    </a>
+  );
+}
+
+function markdownURLTransform(value: string): string {
+  return value.startsWith('sandbox:/mnt/data/') ? value : defaultUrlTransform(value);
+}
+
 const imageGroupTokenPattern = /\uE200image_group\uE202[\s\S]*?\uE201/g;
 const partialImageGroupTokenPattern = /\uE200image_group(?:\uE202[\s\S]*)?$/g;
 
@@ -86,19 +127,28 @@ function ImageGroupGallery({ group }: { group: ImageGroup }) {
   );
 }
 
-function RichMessageContent({ content, imageGroups }: { content: string; imageGroups: ImageGroup[] }) {
+function RichMessageContent({ content, imageGroups, conversationId, messageId }: { content: string; imageGroups: ImageGroup[]; conversationId?: string; messageId?: string }) {
+  const richComponents: Components = {
+    ...components,
+    a({ href, children, ...props }) {
+      if (href?.startsWith('sandbox:/mnt/data/')) {
+        return <SandboxDownloadLink href={href} conversationId={conversationId} messageId={messageId}>{children}</SandboxDownloadLink>;
+      }
+      return <a href={href} {...props}>{children}</a>;
+    },
+  };
   const parts: ReactNode[] = [];
   let cursor = 0;
   imageGroups.forEach((group, index) => {
     const position = content.indexOf(group.matched_text, cursor);
     if (position < 0) return;
     const before = cleanRichTokens(content.slice(cursor, position));
-    if (before) parts.push(<ReactMarkdown key={`text-${index}`} remarkPlugins={[remarkGfm]} components={components}>{sanitizeCitations(before)}</ReactMarkdown>);
+    if (before) parts.push(<ReactMarkdown key={`text-${index}`} remarkPlugins={[remarkGfm]} components={richComponents} urlTransform={markdownURLTransform}>{sanitizeCitations(before)}</ReactMarkdown>);
     parts.push(<ImageGroupGallery key={`images-${index}`} group={group} />);
     cursor = position + group.matched_text.length;
   });
   const remaining = cleanRichTokens(content.slice(cursor));
-  if (remaining) parts.push(<ReactMarkdown key="text-final" remarkPlugins={[remarkGfm]} components={components}>{sanitizeCitations(remaining)}</ReactMarkdown>);
+  if (remaining) parts.push(<ReactMarkdown key="text-final" remarkPlugins={[remarkGfm]} components={richComponents} urlTransform={markdownURLTransform}>{sanitizeCitations(remaining)}</ReactMarkdown>);
   return <>{parts}</>;
 }
 
@@ -180,7 +230,7 @@ function AuthenticatedImage({ image, selected, editing, onUse, onSelect }: { ima
   );
 }
 
-export default function ChatMessage({ role, content, images = [], attachments = [], streaming, status, reasoning, sources = [], imageGroups = [], durationSeconds, selectedImageID, editingImageID, onRetry, onUseImage, onSelectImage }: ChatMessageProps) {
+export default function ChatMessage({ conversationId, upstreamMessageId, role, content, images = [], attachments = [], streaming, status, reasoning, sources = [], imageGroups = [], durationSeconds, selectedImageID, editingImageID, onRetry, onUseImage, onSelectImage }: ChatMessageProps) {
   const [reasoningOpen, setReasoningOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const publicImages = role === 'assistant' ? extractImages(content) : [];
@@ -213,7 +263,7 @@ export default function ChatMessage({ role, content, images = [], attachments = 
         )}
 
         {role === 'assistant' ? (
-          <div className="markdown-body"><RichMessageContent content={content} imageGroups={imageGroups} /></div>
+          <div className="markdown-body"><RichMessageContent content={content} imageGroups={imageGroups} conversationId={conversationId} messageId={upstreamMessageId} /></div>
         ) : <div className="user-content">{content}</div>}
 
         {publicImages.map((url, index) => <img key={url} src={url} alt={`生成图片 ${index + 1}`} className="message-image" loading="lazy" decoding="async" />)}
@@ -249,7 +299,7 @@ export default function ChatMessage({ role, content, images = [], attachments = 
 
         {role === 'assistant' && !streaming && (content || images.length > 0) && (
           <div className="message-actions">
-            {content && <button type="button" onClick={() => void navigator.clipboard.writeText(content)} title="复制">▢</button>}
+            {content && <button type="button" className="message-copy-button" onClick={() => void navigator.clipboard.writeText(content)} title="复制消息" aria-label="复制消息"><CopyIcon /></button>}
             {onRetry && <button type="button" onClick={onRetry} title="重试">↻</button>}
             {sources.length > 0 && <button type="button" onClick={() => setSourcesOpen((open) => !open)}>{sources.length} 个来源</button>}
           </div>

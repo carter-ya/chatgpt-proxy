@@ -4,6 +4,7 @@ import type { FileAsset, ImageGroup, Source } from '../api/client';
 
 interface LocalMessage {
   id: string;
+  upstreamId?: string;
   role: 'user' | 'assistant';
   content: string;
   images?: FileAsset[];
@@ -19,13 +20,14 @@ interface LocalMessage {
 
 interface MessageListProps {
   messages: LocalMessage[];
+  conversationId?: string;
   onRetry?: (messageID: string) => void;
   onUseImage?: (image: FileAsset) => void;
   editingImageID?: string;
   onSelectImage?: (messageID: string, image: FileAsset) => void;
 }
 
-export default function MessageList({ messages, onRetry, onUseImage, editingImageID, onSelectImage }: MessageListProps) {
+export default function MessageList({ messages, conversationId, onRetry, onUseImage, editingImageID, onSelectImage }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const userScrolledUp = useRef(false);
@@ -58,6 +60,8 @@ export default function MessageList({ messages, onRetry, onUseImage, editingImag
         {messages.map((msg) => (
           <ChatMessage
             key={msg.id}
+            conversationId={conversationId}
+            upstreamMessageId={msg.upstreamId || msg.id}
             role={msg.role}
             content={msg.content}
             images={msg.images}

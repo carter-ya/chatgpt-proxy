@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"chatgpt-proxy/backend/internal/sentinel"
@@ -16,7 +17,35 @@ import (
 type ProxyClient interface {
 	BuildRequest(ctx context.Context, method, path, tokenValue string, body io.Reader, contentType string) (*http.Request, error)
 	Do(req *http.Request) (*http.Response, error)
+	OpenStream(ctx context.Context, method, path, tokenValue string, headers http.Header) (*http.Response, error)
 }
+
+func (c *client) OpenStream(ctx context.Context, method, path, tokenValue string, headers http.Header) (*http.Response, error) {
+	if strings.HasPrefix(path, "https://") || strings.HasPrefix(path, "http://") {
+		req, err := http.NewRequestWithContext(ctx, method, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		copyStreamHeaders(req.Header, headers)
+		return c.httpClient.Do(req)
+	}
+	req, err := c.BuildRequest(ctx, method, path, tokenValue, nil, "application/octet-stream")
+	if err != nil {
+		return nil, err
+	}
+	copyStreamHeaders(req.Header, headers)
+	return c.httpClient.Do(req)
+}
+
+func copyStreamHeaders(target, source http.Header) {
+	for _, name := range streamRequestHeaderNames {
+		if value := source.Get(name); value != "" {
+			target.Set(name, value)
+		}
+	}
+}
+
+var streamRequestHeaderNames = []string{"Range", "If-Range", "If-None-Match", "If-Modified-Since"}
 
 // client is the concrete implementation of ProxyClient.
 type client struct {

@@ -187,6 +187,47 @@ func (c *BrowserProxyClient) Do(req *http.Request) (*http.Response, error) {
 	return syntheticResp, nil
 }
 
+// OpenStream opens a response body without decoding it into the non-streaming
+// Sidecar JSON envelope. Signed external URLs are fetched directly by Go;
+// authenticated ChatGPT paths use Sidecar's raw binary stream bridge.
+func (c *BrowserProxyClient) OpenStream(ctx context.Context, method, path, _ string, headers http.Header) (*http.Response, error) {
+	if strings.HasPrefix(path, "https://") || strings.HasPrefix(path, "http://") {
+		req, err := http.NewRequestWithContext(ctx, method, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		copyStreamHeaders(req.Header, headers)
+		return c.httpClient.Do(req)
+	}
+
+	sidecarReq := SidecarProxyRequest{
+		Method: method,
+		Path:   path,
+		Headers: map[string]string{
+			"Content-Type": "application/octet-stream",
+		},
+	}
+	for _, name := range streamRequestHeaderNames {
+		if value := headers.Get(name); value != "" {
+			sidecarReq.Headers[name] = value
+		}
+	}
+	payload, err := json.Marshal(sidecarReq)
+	if err != nil {
+		return nil, fmt.Errorf("序列化 Sidecar 流式请求失败: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.sidecarURL+"/api/proxy?stream=raw", bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("构建 Sidecar 流式请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("Sidecar 流式请求执行失败: %w", err)
+	}
+	return resp, nil
+}
+
 // isStreamingRequest 检测 JSON 请求体是否标记为流式。
 func isStreamingRequest(body []byte) bool {
 	var req struct {

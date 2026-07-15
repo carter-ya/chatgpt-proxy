@@ -41,6 +41,14 @@ func (client *conversationMutationClient) Do(request *http.Request) (*http.Respo
 	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(`{}`)), Request: request}, nil
 }
 
+func (client *conversationMutationClient) OpenStream(ctx context.Context, method, path, _ string, _ http.Header) (*http.Response, error) {
+	request, err := client.BuildRequest(ctx, method, path, "", nil, "application/octet-stream")
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(request)
+}
+
 func ownedConversationRow(owner string) pgx.Row {
 	return &mockRow{scanFn: func(dest ...interface{}) error {
 		*(dest[0].(*string)) = "conversation-1"

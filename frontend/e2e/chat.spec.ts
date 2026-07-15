@@ -6,7 +6,7 @@ async function authenticate(page: Page) {
   await page.goto('/login');
   await page.evaluate(() => {
     localStorage.setItem('token', 'e2e-token');
-    localStorage.setItem('user', JSON.stringify({ email: 'e2e@example.com' }));
+    localStorage.setItem('user', JSON.stringify({ id: 'user-e2e', email: 'e2e@example.com' }));
   });
 }
 
@@ -20,6 +20,103 @@ async function mockModels(page: Page) {
     ] }),
   }));
 }
+
+async function mockEmptyConversations(page: Page) {
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '{"items":[],"total":0}',
+  }));
+}
+
+test('进入聊天页面时每个初始化接口只请求一次', async ({ page }) => {
+  await authenticate(page);
+  const requests = { models: 0, conversations: 0, detail: 0 };
+  await page.route('**/api/models', async (route) => {
+    requests.models += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ default_model: 'gpt-5-6-thinking', options: [{ label: '5.6 高', model: 'gpt-5-6-thinking', thinking_effort: 'extended' }] }),
+    });
+  });
+  await page.route(/\/api\/conversations(?:\?.*)?$/, async (route) => {
+    requests.conversations += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ items: [{ id: 'request-once', title: '单次请求', model: 'gpt-5-6-thinking', updated_at: '2026-07-15T00:00:00Z', kind: 'chat' }], total: 1 }),
+    });
+  });
+  await page.route('**/api/conversations/request-once', async (route) => {
+    requests.detail += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ conversation: { id: 'request-once', title: '单次请求', model: 'gpt-5-6-thinking' }, messages: [{ id: 'answer', role: 'assistant', content: '初始化完成' }] }),
+    });
+  });
+
+  await page.goto('/chat/request-once');
+  await expect(page.getByText('初始化完成')).toBeVisible();
+  await page.waitForTimeout(200);
+  expect(requests).toEqual({ models: 1, conversations: 1, detail: 1 });
+});
+
+test('模型选择按账号持久化并在聊天与图片页共享', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+
+  await page.goto('/chat');
+  const modelSelect = page.getByRole('combobox', { name: '选择模型' });
+  await modelSelect.selectOption('gpt-5-6-thinking|extended');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('chatgpt-proxy:model-preference:v1:user-e2e')))
+    .toBe('gpt-5-6-thinking|extended');
+
+  await page.reload();
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toHaveValue('gpt-5-6-thinking|extended');
+  await page.goto('/images');
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toHaveValue('gpt-5-6-thinking|extended');
+});
+
+test('已保存模型失效时回退到接口默认模型的 standard 档', async ({ page }) => {
+  await authenticate(page);
+  await page.evaluate(() => {
+    localStorage.setItem('chatgpt-proxy:model-preference:v1:user-e2e', 'removed-model|max');
+  });
+  await mockEmptyConversations(page);
+  await page.route('**/api/models', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ default_model: 'gpt-new', options: [
+      { label: '新模型 深入', model: 'gpt-new', thinking_effort: 'extended' },
+      { label: '新模型 标准', model: 'gpt-new', thinking_effort: 'standard' },
+    ] }),
+  }));
+
+  await page.goto('/chat');
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toHaveValue('gpt-new|standard');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('chatgpt-proxy:model-preference:v1:user-e2e')))
+    .toBe('gpt-new|standard');
+});
+
+test('模型接口临时失败时不清除已保存偏好', async ({ page }) => {
+  await authenticate(page);
+  await page.evaluate(() => {
+    localStorage.setItem('chatgpt-proxy:model-preference:v1:user-e2e', 'saved-model|standard');
+  });
+  await mockEmptyConversations(page);
+  await page.route('**/api/models', (route) => route.fulfill({
+    status: 503,
+    contentType: 'application/json',
+    body: '{"error":"temporarily unavailable"}',
+  }));
+
+  await page.goto('/chat');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('chatgpt-proxy:model-preference:v1:user-e2e')))
+    .toBe('saved-model|standard');
+});
 
 test('历史消息清理引用、折叠思考并支持原地重试', async ({ page }) => {
   await authenticate(page);
@@ -85,6 +182,135 @@ test('图片组与无语言代码块使用富组件渲染', async ({ page, conte
   await expect(page.locator('.code-block')).toContainText('面积：1,000,000 平方米');
   await page.getByRole('button', { name: '复制代码' }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('水量 = 10,000 立方米');
+  const copyMessage = page.getByRole('button', { name: '复制消息' });
+  await expect(copyMessage.locator('svg')).toBeVisible();
+  await expect(page.locator('.message-actions')).not.toContainText('▢');
+  await copyMessage.click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('雨的形成过程');
+});
+
+test('助手生成文件链接通过鉴权接口下载且不跳转聊天页面', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ items: [{ id: 'files', title: '演示文稿', model: 'gpt-5-6-thinking', updated_at: '2026-07-12T00:00:00Z', kind: 'chat' }], total: 1 }),
+  }));
+  await page.route('**/api/conversations/files', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      conversation: { id: 'files', title: '演示文稿', model: 'gpt-5-6-thinking' },
+      messages: [{
+        id: 'assistant-file', role: 'assistant',
+        content: '[下载演示文稿](sandbox:/mnt/data/水循环演示.pptx)\n\n[失败文件](sandbox:/mnt/data/missing.zip)\n\n[官方网站](https://example.com)',
+      }],
+    }),
+  }));
+
+  let ticketBody: Record<string, string> = {};
+  let authorization = '';
+  let releaseTicket: (() => void) | undefined;
+  await page.route('**/api/download-tickets', async (route) => {
+    const body = route.request().postDataJSON() as Record<string, string>;
+    if (body.sandbox_path?.endsWith('missing.zip')) {
+      await route.fulfill({ status: 502, contentType: 'application/json', body: '{"error":"missing"}' });
+      return;
+    }
+    ticketBody = body;
+    authorization = route.request().headers().authorization || '';
+    await new Promise<void>((resolve) => { releaseTicket = resolve; });
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ download_url: 'downloads/ticket-ppt', expires_at: '2026-07-12T00:10:00Z' }),
+    });
+  });
+  await page.route('**/api/downloads/ticket-ppt', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      headers: { 'Content-Disposition': "attachment; filename*=UTF-8''%E6%B0%B4%E5%BE%AA%E7%8E%AF%E6%BC%94%E7%A4%BA.pptx" },
+      body: 'ppt-content',
+    });
+  });
+
+  await page.goto('/chat/files');
+  const initialURL = page.url();
+  const downloadLink = page.getByRole('link', { name: '下载演示文稿' });
+  await expect(downloadLink).toHaveAttribute('href', 'sandbox:/mnt/data/%E6%B0%B4%E5%BE%AA%E7%8E%AF%E6%BC%94%E7%A4%BA.pptx');
+  await downloadLink.click();
+  await expect(downloadLink).toContainText('下载中');
+  const nativeDownload = page.waitForEvent('download');
+  releaseTicket?.();
+  await expect((await nativeDownload).suggestedFilename()).toBe('水循环演示.pptx');
+  expect(ticketBody).toEqual({
+    kind: 'sandbox',
+    conversation_id: 'files',
+    message_id: 'assistant-file',
+    sandbox_path: 'sandbox:/mnt/data/%E6%B0%B4%E5%BE%AA%E7%8E%AF%E6%BC%94%E7%A4%BA.pptx',
+  });
+  expect(authorization).toBe('Bearer e2e-token');
+  await expect.poll(() => page.url()).toBe(initialURL);
+
+  await page.getByRole('link', { name: '失败文件' }).click();
+  await expect(page.getByText('（下载失败，点击重试）')).toBeVisible();
+  await expect(page.getByRole('link', { name: '官方网站' })).toHaveAttribute('href', 'https://example.com');
+});
+
+test('新会话流式返回的文件链接使用上游会话和消息 ID 下载', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+  const content = '[下载表格](sandbox:/mnt/data/result.xlsx)';
+  await page.route('**/api/conversation', (route) => route.fulfill({
+    status: 200,
+    contentType: 'text/event-stream',
+    body: [
+      `data: ${JSON.stringify({ conversation_id: 'stream-created' })}\n\n`,
+      `data: ${JSON.stringify({ content, message_id: 'assistant-stream' })}\n\n`,
+      'data: [DONE]\n\n',
+    ].join(''),
+  }));
+  await page.route('**/api/conversations/stream-created', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      conversation: { id: 'stream-created', title: '表格', model: 'gpt-5-6-thinking' },
+      messages: [{ id: 'assistant-stream', role: 'assistant', content }],
+    }),
+  }));
+  let ticketBody: Record<string, string> = {};
+  await page.route('**/api/download-tickets', async (route) => {
+    ticketBody = route.request().postDataJSON() as Record<string, string>;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ download_url: 'downloads/ticket-xlsx', expires_at: '2026-07-12T00:10:00Z' }),
+    });
+  });
+  await page.route('**/api/downloads/ticket-xlsx', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      headers: { 'Content-Disposition': 'attachment; filename="result.xlsx"' },
+      body: 'xlsx-content',
+    });
+  });
+
+  await page.goto('/chat');
+  await page.getByPlaceholder('输入消息...').fill('生成一个表格');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect(page).toHaveURL(/\/chat\/stream-created$/);
+  const nativeDownload = page.waitForEvent('download');
+  await page.getByRole('link', { name: '下载表格' }).click();
+  await expect((await nativeDownload).suggestedFilename()).toBe('result.xlsx');
+  expect(ticketBody).toEqual({
+    kind: 'sandbox',
+    conversation_id: 'stream-created',
+    message_id: 'assistant-stream',
+    sandbox_path: 'sandbox:/mnt/data/result.xlsx',
+  });
 });
 
 test('新会话先显示临时标题再替换为上游标题', async ({ page }) => {
@@ -135,8 +361,9 @@ test('输入框支持多文件上传、任意格式和图片预览', async ({ pa
   }));
   await page.route('**/api/files/upload-1/download', (route) => route.fulfill({ status: 200, contentType: 'image/png', body: png }));
   let uploadIndex = 0;
-  await page.route('**/api/files', async (route) => {
+  await page.route(/\/api\/files(?:\?.*)?$/, async (route) => {
     uploadIndex += 1;
+    expect(new URL(route.request().url()).searchParams.get('size_bytes')).toBe('4');
     const image = uploadIndex === 1;
     await route.fulfill({
       status: 200,
@@ -167,6 +394,61 @@ test('输入框支持多文件上传、任意格式和图片预览', async ({ pa
   await expect(page.locator('.chat-message.user .message-file-card')).toContainText('archive.xyz');
   await expect(page.locator('.chat-message.user .message-file-card')).toContainText('2.0 KB');
   expect(conversationBody.attachments).toHaveLength(2);
+});
+
+test('文件上传失败后可以原地重试', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+  let uploadAttempts = 0;
+  let releaseRetry: (() => void) | undefined;
+  await page.route(/\/api\/files(?:\?.*)?$/, async (route) => {
+    uploadAttempts += 1;
+    if (uploadAttempts === 1) {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"temporarily unavailable"}' });
+      return;
+    }
+    await new Promise<void>((resolve) => { releaseRetry = resolve; });
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ file_id: 'retried-upload', file_name: 'retry.txt', mime_type: 'text/plain', size_bytes: 5, download_url: '/api/files/retried-upload/download' }),
+    });
+  });
+
+  await page.goto('/chat');
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'retry.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('retry'),
+  });
+
+  await expect(page.getByText('上传失败', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '重试', exact: true }).click();
+  await expect(page.getByText(/上传中 \d+%/)).toBeVisible();
+  await expect(page.getByLabel(/retry\.txt 上传进度 \d+%/)).toBeVisible();
+  releaseRetry?.();
+  await expect(page.getByText('retry.txt')).toBeVisible();
+  await expect(page.getByText('上传失败', { exact: true })).toHaveCount(0);
+  expect(uploadAttempts).toBe(2);
+});
+
+test('流式连接技术错误显示为可操作的用户提示', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+  await page.route('**/api/conversation', (route) => route.fulfill({
+    status: 200,
+    contentType: 'text/event-stream',
+    body: 'event: error\ndata: SSE 流读取超时\n\ndata: [DONE]\n\n',
+  }));
+
+  await page.goto('/chat');
+  await page.getByPlaceholder('输入消息...').fill('执行一个长任务');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect(page.getByText(/响应连接中断，结果可能仍在处理中/)).toBeVisible();
+  await expect(page.locator('.chat-message.assistant')).not.toContainText('SSE');
+  await expect(page.locator('.chat-message.assistant')).not.toContainText('Timed out');
 });
 
 test('生成过程中只显示一个思考状态块', async ({ page }) => {

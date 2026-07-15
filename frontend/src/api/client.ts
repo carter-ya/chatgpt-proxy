@@ -39,9 +39,14 @@ function getAuthHeaders() {
   return headers;
 }
 
+export interface AuthUser {
+  id?: string;
+  email: string;
+}
+
 export interface LoginResponse {
   token: string;
-  user: { email: string };
+  user: AuthUser;
 }
 
 export interface Conversation {
@@ -105,6 +110,26 @@ export interface FileAsset {
 export type UploadedFile = FileAsset;
 
 const fileBlobCache = new Map<string, Promise<Blob>>();
+
+function triggerBlobDownload(blob: Blob, fileName: string) {
+  const objectURL = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectURL;
+  link.download = fileName;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(objectURL), 0);
+}
+
+function sandboxFileName(path: string, disposition: string | null): string {
+  const encoded = disposition?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try { return decodeURIComponent(encoded); } catch { /* use the fallback below */ }
+  }
+  const plain = disposition?.match(/filename="?([^";]+)"?/i)?.[1];
+  if (plain) return plain;
+  const fallback = path.split('/').pop() || 'sandbox-file';
+  try { return decodeURIComponent(fallback); } catch { return fallback; }
+}
 
 export interface ModelOption {
   label: string;
@@ -231,12 +256,17 @@ export const chat = {
 
   downloadFile: async (file: Pick<FileAsset, 'download_url' | 'file_name'>) => {
     const blob = await chat.getFileBlob(file);
-    const objectURL = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = objectURL;
-    link.download = file.file_name;
-    link.click();
-    URL.revokeObjectURL(objectURL);
+    triggerBlobDownload(blob, file.file_name);
+  },
+
+  downloadSandboxFile: async (conversationId: string, messageId: string, sandboxPath: string) => {
+    const params = new URLSearchParams({ message_id: messageId, sandbox_path: sandboxPath });
+    const response = await fetch(`${API_BASE}/conversations/${encodeURIComponent(conversationId)}/files/download?${params.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+    if (!response.ok) throw new Error(`文件下载失败: HTTP ${response.status}`);
+    const blob = await response.blob();
+    triggerBlobDownload(blob, sandboxFileName(sandboxPath, response.headers.get('Content-Disposition')));
   },
 
   listConversations: (archived = false) =>

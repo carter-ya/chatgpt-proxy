@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
 import { chat, type FileAsset, type ModelOption, type UploadedFile } from '../api/client';
+import { useAuth } from '../contexts/AuthContext';
+import { modelOptionKey, modelPreferenceKey, resolvePreferredModel } from '../utils/modelPreference';
 
 interface ChatInputProps {
   onSend: (text: string, model: string, thinkingEffort: string | undefined, attachments: UploadedFile[]) => void;
@@ -19,14 +21,11 @@ const fallbackModels: ModelOption[] = [
   { label: '5.6 深入', model: 'gpt-5-6-thinking', thinking_effort: 'max', lane: 'thinking' },
 ];
 
-function optionKey(option: ModelOption) {
-  return `${option.model}|${option.thinking_effort || ''}`;
-}
-
 export default function ChatInput({ onSend, sending, onCancel, placeholder = '输入消息...', referenceImage, onRemoveReference }: ChatInputProps) {
+  const { user } = useAuth();
   const [text, setText] = useState('');
   const [models, setModels] = useState<ModelOption[]>(fallbackModels);
-  const [selectedModel, setSelectedModel] = useState(optionKey(fallbackModels[0]));
+  const [selectedModel, setSelectedModel] = useState(modelOptionKey(fallbackModels[0]));
   const [attachments, setAttachments] = useState<AttachmentPreview[]>([]);
   const [uploading, setUploading] = useState(0);
   const [uploadError, setUploadError] = useState('');
@@ -36,17 +35,24 @@ export default function ChatInput({ onSend, sending, onCancel, placeholder = '�
   const composerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const attachmentsRef = useRef<AttachmentPreview[]>([]);
+  const preferenceKey = useMemo(() => modelPreferenceKey(user), [user?.id, user?.email]);
 
   useEffect(() => {
+    let cancelled = false;
     void chat.getModels().then(({ data }) => {
-      if (!data.options?.length) return;
+      if (cancelled || !data.options?.length) return;
       setModels(data.options);
-      const preferred = data.options.find((option) => option.model === data.default_model)
-        || data.options.find((option) => option.thinking_effort === 'standard')
-        || data.options[0];
-      setSelectedModel(optionKey(preferred));
+      const saved = preferenceKey ? localStorage.getItem(preferenceKey) : null;
+      const preferred = resolvePreferredModel(data.options, data.default_model, saved);
+      if (!preferred) return;
+      const preferredKey = modelOptionKey(preferred);
+      setSelectedModel(preferredKey);
+      if (preferenceKey && saved !== preferredKey) {
+        localStorage.setItem(preferenceKey, preferredKey);
+      }
     }).catch(() => undefined);
-  }, []);
+    return () => { cancelled = true; };
+  }, [preferenceKey]);
 
   useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
   useEffect(() => () => {
@@ -76,9 +82,14 @@ export default function ChatInput({ onSend, sending, onCancel, placeholder = '�
   }, [referenceImage?.file_id, referenceImage?.download_url]);
 
   const selectedOption = useMemo(
-    () => models.find((option) => optionKey(option) === selectedModel) || models[0],
+    () => models.find((option) => modelOptionKey(option) === selectedModel) || models[0],
     [models, selectedModel],
   );
+
+  const selectModel = useCallback((value: string) => {
+    setSelectedModel(value);
+    if (preferenceKey) localStorage.setItem(preferenceKey, value);
+  }, [preferenceKey]);
 
   const adjustHeight = useCallback(() => {
     const textarea = textareaRef.current;
@@ -179,8 +190,8 @@ export default function ChatInput({ onSend, sending, onCancel, placeholder = '�
       {uploadError && <div className="upload-error">{uploadError}</div>}
       <div className="chat-input-container">
         <div className="composer-toolbar">
-          <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={sending} aria-label="选择模型">
-            {models.map((option) => <option key={optionKey(option)} value={optionKey(option)}>{option.label}</option>)}
+          <select value={selectedModel} onChange={(event) => selectModel(event.target.value)} disabled={sending} aria-label="选择模型">
+            {models.map((option) => <option key={modelOptionKey(option)} value={modelOptionKey(option)}>{option.label}</option>)}
           </select>
         </div>
         <div className="chat-input-wrapper">

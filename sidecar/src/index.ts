@@ -1,9 +1,10 @@
 import express, { type Request, type Response } from 'express';
 import { spawn, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Disposable, type Page } from 'playwright';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
+import { BrowserRecoveryController } from './browserRecovery.js';
 
 // ---- Configuration ----
 
@@ -28,6 +29,8 @@ const LOGIN_TIMEOUT_MS = parseInt(process.env.CHATGPT_PROXY_LOGIN_TIMEOUT_MS || 
 const LOGIN_POLL_INTERVAL_MS = 5000; // 5 seconds
 const LOGIN_API_CHECK_INTERVAL_MS = 15_000;
 const CDP_STARTUP_TIMEOUT_MS = 20_000;
+const BROWSER_RECOVERY_WAIT_MS = 20_000;
+const BROWSER_WATCHDOG_INTERVAL_MS = 10_000;
 const CHALLENGE_OPEN_THROTTLE_MS = 30_000;
 const SENTINEL_CACHE_TTL_MS = parseInt(process.env.CHATGPT_PROXY_SENTINEL_CACHE_TTL || '300', 10) * 1000;
 const BROWSER_AUTH_CACHE_TTL_MS = parseInt(
@@ -43,6 +46,11 @@ let proxyPage: Page | null = null;
 let isReady = false;
 let readyError: string | null = null;
 let lastChallengeOpenAt = 0;
+let streamChunkBinding: Disposable | null = null;
+let recoveryController: BrowserRecoveryController | null = null;
+let browserWatchdogTimer: ReturnType<typeof setInterval> | null = null;
+let browserWatchdogRunning = false;
+let shuttingDown = false;
 
 // Track active SSE streams so the exposed browser callback can route chunks
 // to the correct Express response.
@@ -91,6 +99,16 @@ function deleteActiveStream(streamId: string): void {
   const state = activeStreams.get(streamId);
   if (state) clearInterval(state.heartbeat);
   activeStreams.delete(streamId);
+}
+
+function failActiveStreams(message: string): void {
+  for (const [streamId, state] of activeStreams) {
+    if (!state.res.writableEnded) {
+      state.res.write(`event: error\ndata: ${message}\n\n`);
+      state.res.end();
+    }
+    deleteActiveStream(streamId);
+  }
 }
 
 // Sentinel token cache — pre-fetched on startup, refreshed every 5 minutes.
@@ -455,14 +473,21 @@ async function waitForCdp(port: number, timeoutMs: number, getSpawnError: () => 
 }
 
 function markReadyBrowserUnavailable(message: string): void {
-  if (!isReady) {
-    readyError = message;
-    return;
-  }
-
+  const wasReady = isReady;
   isReady = false;
   readyError = message;
-  console.warn(`[sidecar] ${message}`);
+  clearBrowserAuthCache();
+  if (wasReady) {
+    failActiveStreams(message);
+    console.warn(`[sidecar] ${message}`);
+  }
+}
+
+function reportBrowserUnavailable(message: string): void {
+  markReadyBrowserUnavailable(message);
+  if (!shuttingDown) {
+    void recoveryController?.request(message);
+  }
 }
 
 async function handleCdpChromeExit(
@@ -488,13 +513,13 @@ async function handleCdpChromeExit(
       return;
     }
 
-    markReadyBrowserUnavailable(
+    reportBrowserUnavailable(
       'Chrome was closed; leave the sidecar Chrome window open while using proxy mode.',
     );
     return;
   }
 
-  markReadyBrowserUnavailable(`Chrome exited unexpectedly (code=${code}, signal=${signal})`);
+  reportBrowserUnavailable(`Chrome exited unexpectedly (code=${code}, signal=${signal})`);
 }
 
 function spawnCdpChrome(executablePath: string, userDataDir: string, port: number): {
@@ -643,7 +668,7 @@ async function launchCdpBrowserSession(userDataDir: string): Promise<BrowserSess
         return;
       }
 
-      markReadyBrowserUnavailable(
+      reportBrowserUnavailable(
         'Chrome CDP connection disconnected; leave the sidecar Chrome window open while using proxy mode.',
       );
     });
@@ -706,6 +731,10 @@ async function resetBrowserSession(): Promise<void> {
   proxyPage = null;
   isReady = false;
   readyError = null;
+  if (streamChunkBinding) {
+    await streamChunkBinding.dispose().catch(() => undefined);
+    streamChunkBinding = null;
+  }
   await closeBrowserSession(session);
 }
 
@@ -943,6 +972,19 @@ async function openProxyBrowser(userDataDir: string): Promise<Page> {
   return proxyPage;
 }
 
+function watchBrowserLifecycle(session: BrowserSession, page: Page): void {
+  session.context.once('close', () => {
+    if (browserSession === session && isReady) {
+      reportBrowserUnavailable('Chrome browser context closed; recovery is starting.');
+    }
+  });
+  page.once('close', () => {
+    if (proxyPage === page && isReady) {
+      reportBrowserUnavailable('ChatGPT proxy page closed; recovery is starting.');
+    }
+  });
+}
+
 async function initializeBrowser(): Promise<void> {
   const userDataDir = resolveChromeUserDataDir();
   console.log(`[sidecar] Browser profile directory: ${userDataDir}`);
@@ -992,7 +1034,7 @@ async function initializeBrowser(): Promise<void> {
 
   // Expose the stream-chunk callback into the browser page.
   // The browser side calls this with (streamId, chunk, done) for each SSE chunk.
-  await page.exposeFunction(
+  streamChunkBinding = await page.exposeFunction(
     '__sidecarStreamChunk',
     (streamId: string, chunk: string, done: boolean) => {
       const state = activeStreams.get(streamId);
@@ -1010,6 +1052,11 @@ async function initializeBrowser(): Promise<void> {
     },
   );
 
+  if (!browserSession) {
+    throw new Error('Browser session disappeared during initialization');
+  }
+  watchBrowserLifecycle(browserSession, page);
+  readyError = null;
   isReady = true;
   console.log('[sidecar] Browser ready — accepting proxy requests.');
 
@@ -1033,6 +1080,43 @@ async function initializeBrowser(): Promise<void> {
   //     );
   //   });
   // }, 5 * 60 * 1000);
+}
+
+async function recoverBrowser(): Promise<void> {
+  if (shuttingDown) return;
+  await resetBrowserSession();
+  if (shuttingDown) return;
+  await initializeBrowser();
+  if (shuttingDown) await resetBrowserSession();
+}
+
+async function inspectBrowserHealth(): Promise<void> {
+  if (shuttingDown || !isReady) return;
+  const session = browserSession;
+  const page = proxyPage;
+  if (!session || !page || page.isClosed()) {
+    reportBrowserUnavailable('Browser session or proxy page is no longer available.');
+    return;
+  }
+  if (session.mode !== 'cdp') return;
+  if (!session.browser?.isConnected()) {
+    reportBrowserUnavailable('Chrome CDP browser connection is no longer active.');
+    return;
+  }
+  if (!await readCdpVersion(CHROME_CDP_PORT)) {
+    reportBrowserUnavailable('Chrome CDP endpoint is unreachable; recovery is starting.');
+  }
+}
+
+function startBrowserWatchdog(): void {
+  if (browserWatchdogTimer) return;
+  browserWatchdogTimer = setInterval(() => {
+    if (browserWatchdogRunning) return;
+    browserWatchdogRunning = true;
+    void inspectBrowserHealth()
+      .catch((err) => console.warn('[sidecar] Browser watchdog failed:', err))
+      .finally(() => { browserWatchdogRunning = false; });
+  }, BROWSER_WATCHDOG_INTERVAL_MS);
 }
 
 // ---- Sentinel Token Helpers ----
@@ -2923,9 +3007,21 @@ function startServer(): void {
   // ---- POST /api/proxy ----
   app.post('/api/proxy', async (req: Request, res: Response) => {
     if (!isReady || !proxyPage) {
-      res.status(503).json({ error: 'Sidecar not ready' });
-      return;
+      if (isReady && !proxyPage) {
+        reportBrowserUnavailable('Proxy page is missing; recovery is starting.');
+      }
+      const recovered = await recoveryController?.ensureReady(
+        'Proxy request arrived while the browser was unavailable.',
+        BROWSER_RECOVERY_WAIT_MS,
+      );
+      if (!recovered || !isReady || !proxyPage) {
+        res.setHeader('Retry-After', '5');
+        res.status(503).json({ error: readyError || 'Sidecar browser recovery is still in progress' });
+        return;
+      }
     }
+
+    const page = proxyPage;
 
     const isStream = req.query.stream === 'true';
     const { method, path: upstreamPath, headers, body } = req.body as ProxyRequestBody;
@@ -2938,7 +3034,7 @@ function startServer(): void {
     try {
       if (isStream) {
         await handleStreamProxy(
-          proxyPage,
+          page,
           method || 'POST',
           upstreamPath,
           headers || {},
@@ -2948,7 +3044,7 @@ function startServer(): void {
         );
       } else {
         await handleNonStreamProxy(
-          proxyPage,
+          page,
           method || 'POST',
           upstreamPath,
           headers || {},
@@ -2991,6 +3087,23 @@ async function main(): Promise<void> {
     );
   }
 
+  recoveryController = new BrowserRecoveryController({
+    recover: recoverBrowser,
+    isReady: () => isReady && Boolean(proxyPage),
+    onAttempt: ({ attempt, reason }) => {
+      readyError = `Browser recovery attempt ${attempt}: ${reason}`;
+      console.log(`[sidecar] ${readyError}`);
+    },
+    onFailure: ({ attempt, error }) => {
+      readyError = `Browser recovery attempt ${attempt} failed: ${error instanceof Error ? error.message : String(error)}`;
+      console.warn(`[sidecar] ${readyError}`);
+    },
+    onRecovered: ({ attempt }) => {
+      readyError = null;
+      console.log(`[sidecar] Browser recovery succeeded on attempt ${attempt}.`);
+    },
+  });
+
   try {
     await initializeBrowser();
   } catch (err) {
@@ -3000,19 +3113,28 @@ async function main(): Promise<void> {
   }
 
   startServer();
+  startBrowserWatchdog();
+  if (!isReady) {
+    void recoveryController.request(readyError || 'Initial browser setup did not complete.');
+  }
 }
 
 // Graceful shutdown
 async function shutdown(): Promise<void> {
   console.log('[sidecar] Shutting down...');
+  shuttingDown = true;
+  recoveryController?.stop();
+  recoveryController = null;
+  if (browserWatchdogTimer) {
+    clearInterval(browserWatchdogTimer);
+    browserWatchdogTimer = null;
+  }
   if (sentinelRefreshTimer) {
     clearInterval(sentinelRefreshTimer);
     sentinelRefreshTimer = null;
   }
-  await closeBrowserSession(browserSession);
-  browserSession = null;
-  browserContext = null;
-  proxyPage = null;
+  failActiveStreams('Sidecar is shutting down.');
+  await resetBrowserSession();
 }
 
 process.on('SIGINT', async () => {

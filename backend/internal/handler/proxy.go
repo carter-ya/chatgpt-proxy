@@ -15,6 +15,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -822,6 +823,97 @@ func (h *ProxyHandler) DownloadFile(c *gin.Context) {
 	}
 	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": fileName}))
 	c.Data(http.StatusOK, contentType, fileBytes)
+}
+
+// DownloadSandboxFile resolves an assistant-generated sandbox path through the
+// conversation interpreter endpoint and proxies the resulting file bytes.
+func (h *ProxyHandler) DownloadSandboxFile(c *gin.Context) {
+	conversationID := strings.TrimSpace(c.Param("id"))
+	messageID := strings.TrimSpace(c.Query("message_id"))
+	rawSandboxPath := strings.TrimSpace(c.Query("sandbox_path"))
+	if conversationID == "" || messageID == "" || rawSandboxPath == "" {
+		httpresp.Error(c, http.StatusBadRequest, "会话 ID、消息 ID 和文件路径不能为空")
+		return
+	}
+
+	sandboxPath, ok := normalizeSandboxPath(rawSandboxPath)
+	if !ok {
+		httpresp.Error(c, http.StatusBadRequest, "无效的 sandbox 文件路径")
+		return
+	}
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
+	if !h.requireConversationOwner(c, conversationID, userID) {
+		return
+	}
+
+	query := url.Values{}
+	query.Set("message_id", messageID)
+	query.Set("sandbox_path", sandboxPath)
+	metadataPath := "/backend-api/conversation/" + url.PathEscape(conversationID) + "/interpreter/download?" + query.Encode()
+	metadataStatus, metadataBody, err := h.doProxyBytes(c.Request.Context(), http.MethodGet, metadataPath, nil, "application/json")
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, "获取 sandbox 文件下载地址失败")
+		return
+	}
+	if metadataStatus < http.StatusOK || metadataStatus >= http.StatusMultipleChoices {
+		writeProxyError(c, metadataStatus, metadataBody, "获取 sandbox 文件下载地址失败")
+		return
+	}
+
+	var metadata upstreamFileDownloadResponse
+	if err := json.Unmarshal(metadataBody, &metadata); err != nil || metadata.DownloadURL == "" {
+		httpresp.Error(c, http.StatusBadGateway, "上游未返回有效的 sandbox 文件下载地址")
+		return
+	}
+
+	downloadTarget := metadata.DownloadURL
+	if parsed, parseErr := url.Parse(metadata.DownloadURL); parseErr == nil && strings.EqualFold(parsed.Hostname(), "chatgpt.com") {
+		downloadTarget = parsed.RequestURI()
+	}
+	downloadStatus, fileBytes, err := h.doProxyBytes(c.Request.Context(), http.MethodGet, downloadTarget, nil, "application/octet-stream")
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, "下载 sandbox 文件内容失败")
+		return
+	}
+	if downloadStatus < http.StatusOK || downloadStatus >= http.StatusMultipleChoices {
+		writeProxyError(c, downloadStatus, fileBytes, "下载 sandbox 文件内容失败")
+		return
+	}
+
+	contentType := metadata.MIMEType
+	if contentType == "" && len(fileBytes) > 0 {
+		contentType = http.DetectContentType(fileBytes)
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	fileName := filepath.Base(metadata.FileName)
+	if fileName == "." || fileName == "" {
+		fileName = path.Base(sandboxPath)
+	}
+	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": fileName}))
+	c.Data(http.StatusOK, contentType, fileBytes)
+}
+
+func normalizeSandboxPath(value string) (string, bool) {
+	if !strings.HasPrefix(value, "sandbox:") || strings.ContainsRune(value, '\x00') {
+		return "", false
+	}
+	value = strings.TrimPrefix(value, "sandbox:")
+	decoded, err := url.PathUnescape(value)
+	if err != nil || strings.ContainsRune(decoded, '\x00') {
+		return "", false
+	}
+	value = decoded
+	cleaned := path.Clean(value)
+	if cleaned == "/mnt/data" || !strings.HasPrefix(cleaned, "/mnt/data/") {
+		return "", false
+	}
+	return cleaned, true
 }
 
 func (h *ProxyHandler) doProxyBytes(ctx context.Context, method, path string, body []byte, contentType string) (int, []byte, error) {

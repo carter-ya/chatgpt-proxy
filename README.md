@@ -151,13 +151,11 @@ make migrate-down ALL=true
 | `CHATGPT_PROXY_CHROME_PROFILE_DIRECTORY` | 否 | `Default` | Chrome profile 名称 |
 | `CHATGPT_PROXY_CHROME_PROXY_SERVER` | 否 | 无 | Chrome 显式代理地址 |
 
-`CHATGPT_PROXY_SESSION_TOKENS` 已废弃；当前链路只使用 Sidecar Chrome 登录态。
-
 ## 使用说明
 
 ### 普通聊天
 
-聊天输入框会从 Sidecar 当前登录账号动态读取模型和思考档位。回复支持流式文本、Markdown、代码块、搜索来源和图片组。新会话会在创建后立即出现在侧栏，稍后自动替换为 ChatGPT 生成的正式标题。
+聊天输入框会从 Sidecar 当前登录账号动态读取模型和思考档位。选中的模型会按本地用户保存，并在聊天页、图片页和页面刷新后复用；若该选项已下线，会自动回退到新模型列表的默认模型。回复支持流式文本、Markdown、代码块、搜索来源和图片组。新会话会在创建后立即出现在侧栏，稍后自动替换为 ChatGPT 生成的正式标题。
 
 ### Images 工作区
 
@@ -183,6 +181,7 @@ Sidecar：
 
 ```sh
 cd sidecar
+npm test
 npm run build
 ```
 
@@ -217,7 +216,7 @@ Sidecar 默认以 CDP 模式启动 Chrome。首次验证 profile 或登录态失
 
 ### Cloudflare challenge
 
-如果 Chrome 出现 Cloudflare challenge，请在可见窗口中手动完成。不要关闭 Sidecar 管理的 Chrome；CDP 断开后，上游接口会返回 503。
+如果 Chrome 出现 Cloudflare challenge，请在可见窗口中手动完成。Sidecar 会巡检 CDP 连接；Chrome 或代理页意外关闭后会自动重连，必要时重新拉起 Chrome。登录态失效时仍需在打开的窗口中手动完成登录或验证。
 
 如果验证反复出现，可以在完全退出普通 Chrome 后复用日常 profile：
 

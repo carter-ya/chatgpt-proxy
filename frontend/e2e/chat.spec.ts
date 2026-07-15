@@ -6,7 +6,7 @@ async function authenticate(page: Page) {
   await page.goto('/login');
   await page.evaluate(() => {
     localStorage.setItem('token', 'e2e-token');
-    localStorage.setItem('user', JSON.stringify({ email: 'e2e@example.com' }));
+    localStorage.setItem('user', JSON.stringify({ id: 'user-e2e', email: 'e2e@example.com' }));
   });
 }
 
@@ -20,6 +20,69 @@ async function mockModels(page: Page) {
     ] }),
   }));
 }
+
+async function mockEmptyConversations(page: Page) {
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '{"items":[],"total":0}',
+  }));
+}
+
+test('模型选择按账号持久化并在聊天与图片页共享', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+
+  await page.goto('/chat');
+  const modelSelect = page.getByRole('combobox', { name: '选择模型' });
+  await modelSelect.selectOption('gpt-5-6-thinking|extended');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('chatgpt-proxy:model-preference:v1:user-e2e')))
+    .toBe('gpt-5-6-thinking|extended');
+
+  await page.reload();
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toHaveValue('gpt-5-6-thinking|extended');
+  await page.goto('/images');
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toHaveValue('gpt-5-6-thinking|extended');
+});
+
+test('已保存模型失效时回退到接口默认模型的 standard 档', async ({ page }) => {
+  await authenticate(page);
+  await page.evaluate(() => {
+    localStorage.setItem('chatgpt-proxy:model-preference:v1:user-e2e', 'removed-model|max');
+  });
+  await mockEmptyConversations(page);
+  await page.route('**/api/models', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ default_model: 'gpt-new', options: [
+      { label: '新模型 深入', model: 'gpt-new', thinking_effort: 'extended' },
+      { label: '新模型 标准', model: 'gpt-new', thinking_effort: 'standard' },
+    ] }),
+  }));
+
+  await page.goto('/chat');
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toHaveValue('gpt-new|standard');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('chatgpt-proxy:model-preference:v1:user-e2e')))
+    .toBe('gpt-new|standard');
+});
+
+test('模型接口临时失败时不清除已保存偏好', async ({ page }) => {
+  await authenticate(page);
+  await page.evaluate(() => {
+    localStorage.setItem('chatgpt-proxy:model-preference:v1:user-e2e', 'saved-model|standard');
+  });
+  await mockEmptyConversations(page);
+  await page.route('**/api/models', (route) => route.fulfill({
+    status: 503,
+    contentType: 'application/json',
+    body: '{"error":"temporarily unavailable"}',
+  }));
+
+  await page.goto('/chat');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('chatgpt-proxy:model-preference:v1:user-e2e')))
+    .toBe('saved-model|standard');
+});
 
 test('历史消息清理引用、折叠思考并支持原地重试', async ({ page }) => {
   await authenticate(page);
@@ -85,6 +148,114 @@ test('图片组与无语言代码块使用富组件渲染', async ({ page, conte
   await expect(page.locator('.code-block')).toContainText('面积：1,000,000 平方米');
   await page.getByRole('button', { name: '复制代码' }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('水量 = 10,000 立方米');
+  const copyMessage = page.getByRole('button', { name: '复制消息' });
+  await expect(copyMessage.locator('svg')).toBeVisible();
+  await expect(page.locator('.message-actions')).not.toContainText('▢');
+  await copyMessage.click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('雨的形成过程');
+});
+
+test('助手生成文件链接通过鉴权接口下载且不跳转聊天页面', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ items: [{ id: 'files', title: '演示文稿', model: 'gpt-5-6-thinking', updated_at: '2026-07-12T00:00:00Z', kind: 'chat' }], total: 1 }),
+  }));
+  await page.route('**/api/conversations/files', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      conversation: { id: 'files', title: '演示文稿', model: 'gpt-5-6-thinking' },
+      messages: [{
+        id: 'assistant-file', role: 'assistant',
+        content: '[下载演示文稿](sandbox:/mnt/data/水循环演示.pptx)\n\n[失败文件](sandbox:/mnt/data/missing.zip)\n\n[官方网站](https://example.com)',
+      }],
+    }),
+  }));
+
+  let downloadURL = '';
+  let authorization = '';
+  let releaseDownload: (() => void) | undefined;
+  await page.route(/\/api\/conversations\/files\/files\/download\?.+/, async (route) => {
+    const requestURL = new URL(route.request().url());
+    if (requestURL.searchParams.get('sandbox_path')?.endsWith('missing.zip')) {
+      await route.fulfill({ status: 502, contentType: 'application/json', body: '{"error":"missing"}' });
+      return;
+    }
+    downloadURL = route.request().url();
+    authorization = route.request().headers().authorization || '';
+    await new Promise<void>((resolve) => { releaseDownload = resolve; });
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      headers: { 'Content-Disposition': "attachment; filename*=UTF-8''%E6%B0%B4%E5%BE%AA%E7%8E%AF%E6%BC%94%E7%A4%BA.pptx" },
+      body: 'ppt-content',
+    });
+  });
+
+  await page.goto('/chat/files');
+  const initialURL = page.url();
+  const downloadLink = page.getByRole('link', { name: '下载演示文稿' });
+  await expect(downloadLink).toHaveAttribute('href', 'sandbox:/mnt/data/%E6%B0%B4%E5%BE%AA%E7%8E%AF%E6%BC%94%E7%A4%BA.pptx');
+  await downloadLink.click();
+  await expect(downloadLink).toContainText('下载中');
+  releaseDownload?.();
+  await expect.poll(() => downloadURL).toContain('/api/conversations/files/files/download?');
+  const requested = new URL(downloadURL);
+  expect(requested.searchParams.get('message_id')).toBe('assistant-file');
+  expect(requested.searchParams.get('sandbox_path')).toBe('sandbox:/mnt/data/%E6%B0%B4%E5%BE%AA%E7%8E%AF%E6%BC%94%E7%A4%BA.pptx');
+  expect(authorization).toBe('Bearer e2e-token');
+  await expect.poll(() => page.url()).toBe(initialURL);
+
+  await page.getByRole('link', { name: '失败文件' }).click();
+  await expect(page.getByText('（下载失败，点击重试）')).toBeVisible();
+  await expect(page.getByRole('link', { name: '官方网站' })).toHaveAttribute('href', 'https://example.com');
+});
+
+test('新会话流式返回的文件链接使用上游会话和消息 ID 下载', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+  const content = '[下载表格](sandbox:/mnt/data/result.xlsx)';
+  await page.route('**/api/conversation', (route) => route.fulfill({
+    status: 200,
+    contentType: 'text/event-stream',
+    body: [
+      `data: ${JSON.stringify({ conversation_id: 'stream-created' })}\n\n`,
+      `data: ${JSON.stringify({ content, message_id: 'assistant-stream' })}\n\n`,
+      'data: [DONE]\n\n',
+    ].join(''),
+  }));
+  await page.route('**/api/conversations/stream-created', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      conversation: { id: 'stream-created', title: '表格', model: 'gpt-5-6-thinking' },
+      messages: [{ id: 'assistant-stream', role: 'assistant', content }],
+    }),
+  }));
+  let messageId = '';
+  let sandboxPath = '';
+  await page.route(/\/api\/conversations\/stream-created\/files\/download\?.+/, async (route) => {
+    const requestURL = new URL(route.request().url());
+    messageId = requestURL.searchParams.get('message_id') || '';
+    sandboxPath = requestURL.searchParams.get('sandbox_path') || '';
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      headers: { 'Content-Disposition': 'attachment; filename="result.xlsx"' },
+      body: 'xlsx-content',
+    });
+  });
+
+  await page.goto('/chat');
+  await page.getByPlaceholder('输入消息...').fill('生成一个表格');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect(page).toHaveURL(/\/chat\/stream-created$/);
+  await page.getByRole('link', { name: '下载表格' }).click();
+  await expect.poll(() => messageId).toBe('assistant-stream');
+  expect(sandboxPath).toBe('sandbox:/mnt/data/result.xlsx');
 });
 
 test('新会话先显示临时标题再替换为上游标题', async ({ page }) => {

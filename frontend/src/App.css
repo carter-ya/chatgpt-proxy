@@ -701,6 +701,20 @@ input, textarea {
   text-decoration: underline;
 }
 
+.message-body .markdown-body .sandbox-download-link[aria-busy="true"] {
+  cursor: wait;
+}
+
+.message-body .markdown-body .sandbox-download-link.error,
+.sandbox-download-status[role="status"] {
+  color: #e57373;
+}
+
+.sandbox-download-status {
+  margin-left: 4px;
+  font-size: 0.9em;
+}
+
 .message-body .markdown-body .task-list-item {
   list-style: none;
 }
@@ -1074,6 +1088,18 @@ input, textarea {
 }
 
 .message-actions button:hover, .image-actions button:hover { background: #202123; color: #fff; }
+
+.message-copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.message-copy-icon {
+  display: block;
+  width: 17px;
+  height: 17px;
+}
 
 .sources-panel {
   margin-top: 10px;

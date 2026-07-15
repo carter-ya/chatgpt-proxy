@@ -77,6 +77,7 @@ func New(cfg *config.Config) (*App, error) {
 	protected.POST("/files", proxyHandler.UploadFile)
 	protected.GET("/files/:id/download", proxyHandler.DownloadFile)
 	protected.GET("/conversations", proxyHandler.ListConversations)
+	protected.GET("/conversations/:id/files/download", proxyHandler.DownloadSandboxFile)
 	protected.GET("/conversations/:id", proxyHandler.GetConversation)
 	protected.PATCH("/conversations/:id", proxyHandler.UpdateConversation)
 	protected.DELETE("/conversations/:id", proxyHandler.DeleteConversation)

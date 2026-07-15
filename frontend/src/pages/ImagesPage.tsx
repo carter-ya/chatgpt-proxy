@@ -40,6 +40,10 @@ export default function ImagesPage() {
 
   useEffect(() => {
     if (!conversationId) { setMessages([]); return; }
+    if (pendingConversation.current === conversationId && streamID.current) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     void chat.getConversation(conversationId).then(({ data }) => {
       setMessages(data.messages.map((message, index) => ({ ...message, id: message.id || `${conversationId}-${index}`, content: message.content || '' })));
@@ -72,6 +76,7 @@ export default function ImagesPage() {
         if (pendingConversation.current === id) return;
         pendingConversation.current = id;
         announceConversation(id, text, 'image');
+        navigate(`/images/${id}`, { replace: true });
         void refreshConversationTitle(id);
       },
       onToken: (content) => updateStream((message) => ({ ...message, content })),
@@ -87,15 +92,15 @@ export default function ImagesPage() {
         updateStream((message) => ({ ...message, streaming: false, status: '', durationSeconds: Math.max(1, Math.round((Date.now() - startedAt.current) / 1000)) }));
         setReference(undefined);
         streamID.current = '';
-        const created = pendingConversation.current;
         pendingConversation.current = '';
-        if (created && !conversationId) navigate(`/images/${created}`, { replace: true });
         void loadConversations();
       },
       onError: (streamError) => {
         updateStream((message) => ({ ...message, content: `错误：${streamError.message}`, streaming: false, status: '' }));
         setError(streamError.message);
         streamID.current = '';
+        pendingConversation.current = '';
+        void loadConversations();
       },
     });
   }, [announceConversation, conversationId, loadConversations, navigate, reference, refreshConversationTitle, sendMessage, updateStream]);

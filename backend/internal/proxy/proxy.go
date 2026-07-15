@@ -38,12 +38,14 @@ func (c *client) OpenStream(ctx context.Context, method, path, tokenValue string
 }
 
 func copyStreamHeaders(target, source http.Header) {
-	for _, name := range []string{"Range", "If-Range"} {
+	for _, name := range streamRequestHeaderNames {
 		if value := source.Get(name); value != "" {
 			target.Set(name, value)
 		}
 	}
 }
+
+var streamRequestHeaderNames = []string{"Range", "If-Range", "If-None-Match", "If-Modified-Since"}
 
 // client is the concrete implementation of ProxyClient.
 type client struct {

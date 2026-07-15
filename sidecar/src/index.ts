@@ -3141,7 +3141,6 @@ function startServer(): void {
 
   // Parse JSON bodies — the outer envelope is JSON; the inner "body" field
   // is a pre-serialized string that we pass through untouched.
-  // Base64 adds roughly 33% overhead to the 50 MB upload limit.
   app.use(express.json({ limit: '70mb' }));
 
   // ---- GET /health ----

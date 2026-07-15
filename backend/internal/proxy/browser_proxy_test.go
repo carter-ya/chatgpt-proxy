@@ -111,6 +111,36 @@ func TestBrowserProxyClientConversationUsesStreamEndpointWithoutStreamField(t *t
 	}
 }
 
+func TestBrowserProxyClientOpenStreamForwardsConditionalHeaders(t *testing.T) {
+	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Query().Get("stream") != "raw" {
+			t.Fatalf("stream mode = %q", request.URL.Query().Get("stream"))
+		}
+		var envelope SidecarProxyRequest
+		if err := json.NewDecoder(request.Body).Decode(&envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Headers["If-None-Match"] != `"etag"` || envelope.Headers["If-Modified-Since"] == "" {
+			t.Fatalf("stream headers = %#v", envelope.Headers)
+		}
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer sidecar.Close()
+
+	client := NewBrowserProxyClient(sidecar.URL, "https://chatgpt.com")
+	headers := make(http.Header)
+	headers.Set("If-None-Match", `"etag"`)
+	headers.Set("If-Modified-Since", "Wed, 15 Jul 2026 00:00:00 GMT")
+	response, err := client.OpenStream(context.Background(), http.MethodGet, "/backend-api/files/content", "", headers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusNotModified {
+		t.Fatalf("status = %d", response.StatusCode)
+	}
+}
+
 func TestBrowserProxyClientAsyncStatusUsesNonStreamProxyAndPreservesResponse(t *testing.T) {
 	const conversationID = "6a52f406-2fb0-83e8-a0b8-f0170fe24cb2"
 	sidecar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"path"
@@ -87,6 +88,14 @@ type upstreamFileCreateResponse struct {
 	FileID    string `json:"file_id"`
 	UploadURL string `json:"upload_url"`
 }
+
+const (
+	maxUploadSize          int64 = 50 << 20
+	maxUploadRequestSize         = maxUploadSize + (1 << 20)
+	maxControlResponseSize       = 1 << 20
+	maxUploadResponseSize        = 64 << 10
+	uploadTimeout                = 5 * time.Minute
+)
 
 type upstreamFileDownloadResponse struct {
 	Status      string `json:"status"`
@@ -649,44 +658,68 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 		return
 	}
 
-	file, header, err := c.Request.FormFile("file")
+	declaredSize, err := strconv.ParseInt(strings.TrimSpace(c.Query("size_bytes")), 10, 64)
+	if err != nil || declaredSize <= 0 {
+		httpresp.Error(c, http.StatusBadRequest, "缺少有效的文件大小")
+		return
+	}
+	if declaredSize > maxUploadSize {
+		httpresp.Error(c, http.StatusRequestEntityTooLarge, "上传文件大小不能超过 50MB")
+		return
+	}
+	if c.Request.ContentLength > maxUploadRequestSize {
+		httpresp.Error(c, http.StatusRequestEntityTooLarge, "上传请求大小超过限制")
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadRequestSize)
+	multipartReader, err := c.Request.MultipartReader()
 	if err != nil {
-		httpresp.Error(c, http.StatusBadRequest, "未找到上传文件")
+		httpresp.Error(c, http.StatusBadRequest, "上传请求必须使用 multipart/form-data")
+		return
+	}
+	file, err := findUploadPart(multipartReader)
+	if err != nil {
+		if isRequestTooLarge(err) {
+			httpresp.Error(c, http.StatusRequestEntityTooLarge, "上传请求大小超过限制")
+		} else {
+			httpresp.Error(c, http.StatusBadRequest, "未找到上传文件")
+		}
 		return
 	}
 	defer file.Close()
 
-	// Validate file is not empty.
-	if header.Size == 0 {
+	prefix := make([]byte, 512)
+	prefixLength, prefixErr := io.ReadFull(file, prefix)
+	if prefixErr != nil && !errors.Is(prefixErr, io.EOF) && !errors.Is(prefixErr, io.ErrUnexpectedEOF) {
+		if isRequestTooLarge(prefixErr) {
+			httpresp.Error(c, http.StatusRequestEntityTooLarge, "上传请求大小超过限制")
+		} else {
+			httpresp.Error(c, http.StatusBadRequest, "读取上传文件失败")
+		}
+		return
+	}
+	prefix = prefix[:prefixLength]
+	if len(prefix) == 0 {
 		httpresp.Error(c, http.StatusBadRequest, "上传文件不能为空")
 		return
 	}
-
-	// Validate file size does not exceed 50MB.
-	const maxUploadSize = 50 * 1024 * 1024 // 50MB
-	if header.Size > maxUploadSize {
-		httpresp.Error(c, http.StatusRequestEntityTooLarge, "上传文件大小不能超过 50MB")
+	if int64(len(prefix)) > declaredSize {
+		httpresp.Error(c, http.StatusBadRequest, "文件实际大小与声明不一致")
 		return
 	}
 
-	fileBytes, err := io.ReadAll(file)
-	if err != nil {
-		httpresp.Error(c, http.StatusInternalServerError, "读取上传文件失败")
-		return
-	}
-
-	contentType := strings.TrimSpace(strings.Split(header.Header.Get("Content-Type"), ";")[0])
+	contentType := strings.TrimSpace(strings.Split(file.Header.Get("Content-Type"), ";")[0])
 	if contentType == "" || contentType == "application/octet-stream" {
-		contentType = http.DetectContentType(fileBytes)
+		contentType = http.DetectContentType(prefix)
 	}
-	fileName := filepath.Base(header.Filename)
+	fileName := filepath.Base(file.FileName())
 	if fileName == "." || fileName == "" {
 		fileName = "upload"
 	}
 
 	createPayload, err := json.Marshal(map[string]interface{}{
 		"file_name": fileName,
-		"file_size": len(fileBytes),
+		"file_size": declaredSize,
 		"use_case":  fileUseCase(contentType),
 	})
 	if err != nil {
@@ -711,14 +744,58 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 		return
 	}
 
-	putStatus, putBody, err := h.doProxyBytes(ctx, http.MethodPut, created.UploadURL, fileBytes, contentType)
+	payload := io.MultiReader(bytes.NewReader(prefix), file)
+	exactReader := &exactSizeReader{reader: payload, remaining: declaredSize}
+	var probe *bestEffortProbeWriter
+	var probeResult <-chan imageProbeResult
+	uploadReader := io.Reader(exactReader)
+	if strings.HasPrefix(contentType, "image/") {
+		probe, probeResult = startImageProbe()
+		defer probe.Close()
+		uploadReader = io.TeeReader(exactReader, probe)
+	}
+
+	uploadCtx, cancelUpload := context.WithTimeout(ctx, uploadTimeout)
+	putStatus, putBody, err := putUploadStream(uploadCtx, created.UploadURL, uploadReader, declaredSize, contentType)
+	cancelUpload()
 	if err != nil {
-		httpresp.Error(c, http.StatusBadGateway, "上传文件内容失败")
+		if exactReader.prematureEOF {
+			httpresp.Error(c, http.StatusBadRequest, "文件实际大小与声明不一致")
+		} else if errors.Is(uploadCtx.Err(), context.DeadlineExceeded) {
+			httpresp.Error(c, http.StatusGatewayTimeout, "上传文件内容超时")
+		} else {
+			httpresp.Error(c, http.StatusBadGateway, "上传文件内容失败")
+		}
 		return
 	}
 	if putStatus < 200 || putStatus >= 300 {
 		writeProxyError(c, putStatus, putBody, "上传文件内容失败")
 		return
+	}
+	if exactReader.remaining != 0 {
+		httpresp.Error(c, http.StatusBadGateway, "上游未完整读取上传文件")
+		return
+	}
+	extra := make([]byte, 1)
+	extraLength, extraErr := payload.Read(extra)
+	if extraLength > 0 {
+		httpresp.Error(c, http.StatusBadRequest, "文件实际大小与声明不一致")
+		return
+	}
+	if extraErr != nil && !errors.Is(extraErr, io.EOF) {
+		if isRequestTooLarge(extraErr) {
+			httpresp.Error(c, http.StatusRequestEntityTooLarge, "上传请求大小超过限制")
+		} else {
+			httpresp.Error(c, http.StatusBadRequest, "校验上传文件大小失败")
+		}
+		return
+	}
+
+	width, height := 0, 0
+	if probe != nil {
+		probe.Close()
+		result := <-probeResult
+		width, height = result.width, result.height
 	}
 
 	confirmPath := "/backend-api/files/" + url.PathEscape(created.FileID) + "/uploaded"
@@ -741,23 +818,123 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 		return
 	}
 
-	width, height := 0, 0
-	if strings.HasPrefix(contentType, "image/") {
-		if config, _, decodeErr := image.DecodeConfig(bytes.NewReader(fileBytes)); decodeErr == nil {
-			width, height = config.Width, config.Height
-		}
-	}
 	downloadURL := "/api/files/" + url.PathEscape(created.FileID) + "/download"
 	c.JSON(http.StatusOK, gin.H{
 		"file_id":      created.FileID,
 		"file_name":    fileName,
 		"mime_type":    contentType,
-		"size_bytes":   len(fileBytes),
+		"size_bytes":   declaredSize,
 		"width":        width,
 		"height":       height,
 		"url":          downloadURL,
 		"download_url": downloadURL,
 	})
+}
+
+func findUploadPart(reader *multipart.Reader) (*multipart.Part, error) {
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			return nil, err
+		}
+		if part.FormName() == "file" && part.FileName() != "" {
+			return part, nil
+		}
+		part.Close()
+	}
+}
+
+func isRequestTooLarge(err error) bool {
+	var maxBytesError *http.MaxBytesError
+	return errors.As(err, &maxBytesError)
+}
+
+type exactSizeReader struct {
+	reader       io.Reader
+	remaining    int64
+	prematureEOF bool
+}
+
+func (reader *exactSizeReader) Read(buffer []byte) (int, error) {
+	if reader.remaining == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(buffer)) > reader.remaining {
+		buffer = buffer[:reader.remaining]
+	}
+	read, err := reader.reader.Read(buffer)
+	reader.remaining -= int64(read)
+	if errors.Is(err, io.EOF) && reader.remaining > 0 {
+		reader.prematureEOF = true
+	}
+	if read > 0 && errors.Is(err, io.EOF) {
+		err = nil
+	}
+	return read, err
+}
+
+type imageProbeResult struct {
+	width  int
+	height int
+}
+
+type bestEffortProbeWriter struct {
+	writer   *io.PipeWriter
+	disabled bool
+}
+
+func (writer *bestEffortProbeWriter) Write(buffer []byte) (int, error) {
+	if writer.disabled {
+		return len(buffer), nil
+	}
+	if _, err := writer.writer.Write(buffer); err != nil {
+		writer.disabled = true
+		return len(buffer), nil
+	}
+	return len(buffer), nil
+}
+
+func (writer *bestEffortProbeWriter) Close() {
+	if writer == nil || writer.disabled {
+		return
+	}
+	writer.disabled = true
+	_ = writer.writer.Close()
+}
+
+func startImageProbe() (*bestEffortProbeWriter, <-chan imageProbeResult) {
+	reader, writer := io.Pipe()
+	result := make(chan imageProbeResult, 1)
+	go func() {
+		config, _, err := image.DecodeConfig(reader)
+		_ = reader.Close()
+		if err != nil {
+			result <- imageProbeResult{}
+			return
+		}
+		result <- imageProbeResult{width: config.Width, height: config.Height}
+	}()
+	return &bestEffortProbeWriter{writer: writer}, result
+}
+
+func putUploadStream(ctx context.Context, target string, body io.Reader, size int64, contentType string) (int, []byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, target, io.NopCloser(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	request.ContentLength = size
+	request.Header.Set("Content-Type", contentType)
+	request.Header.Set("x-ms-blob-type", "BlockBlob")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxUploadResponseSize))
+	if err != nil {
+		return 0, nil, err
+	}
+	return response.StatusCode, responseBody, nil
 }
 
 type createDownloadTicketRequest struct {
@@ -842,7 +1019,7 @@ func (h *ProxyHandler) DownloadWithTicket(c *gin.Context) {
 	}
 	switch resource.Kind {
 	case "file":
-		h.serveFileDownload(c, resource.FileID, resource.UserID)
+		h.serveFileDownload(c, resource.FileID, resource.UserID, false)
 	case "sandbox":
 		h.serveSandboxDownload(c, resource.ConversationID, resource.MessageID, resource.SandboxPath, resource.UserID)
 	default:
@@ -857,10 +1034,10 @@ func (h *ProxyHandler) DownloadFile(c *gin.Context) {
 		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
 		return
 	}
-	h.serveFileDownload(c, strings.TrimSpace(c.Param("id")), userID)
+	h.serveFileDownload(c, strings.TrimSpace(c.Param("id")), userID, true)
 }
 
-func (h *ProxyHandler) serveFileDownload(c *gin.Context, fileID, userID string) {
+func (h *ProxyHandler) serveFileDownload(c *gin.Context, fileID, userID string, revalidate bool) {
 	if fileID == "" {
 		httpresp.Error(c, http.StatusBadRequest, "文件 ID 不能为空")
 		return
@@ -877,7 +1054,7 @@ func (h *ProxyHandler) serveFileDownload(c *gin.Context, fileID, userID string) 
 	if fileName == "." || fileName == "" {
 		fileName = fileID
 	}
-	h.streamDownload(c, metadata, fileName, "下载文件内容失败")
+	h.streamDownload(c, metadata, fileName, "下载文件内容失败", revalidate)
 }
 
 // DownloadSandboxFile streams an assistant-generated sandbox path.
@@ -915,7 +1092,7 @@ func (h *ProxyHandler) serveSandboxDownload(c *gin.Context, conversationID, mess
 	if fileName == "." || fileName == "" {
 		fileName = path.Base(sandboxPath)
 	}
-	h.streamDownload(c, metadata, fileName, "下载 sandbox 文件内容失败")
+	h.streamDownload(c, metadata, fileName, "下载 sandbox 文件内容失败", false)
 }
 
 func (h *ProxyHandler) readDownloadMetadata(c *gin.Context, metadataPath, fallback string) (upstreamFileDownloadResponse, bool) {
@@ -936,7 +1113,7 @@ func (h *ProxyHandler) readDownloadMetadata(c *gin.Context, metadataPath, fallba
 	return metadata, true
 }
 
-func (h *ProxyHandler) streamDownload(c *gin.Context, metadata upstreamFileDownloadResponse, fileName, fallback string) {
+func (h *ProxyHandler) streamDownload(c *gin.Context, metadata upstreamFileDownloadResponse, fileName, fallback string, revalidate bool) {
 	downloadTarget := metadata.DownloadURL
 	if parsed, err := url.Parse(metadata.DownloadURL); err == nil && strings.EqualFold(parsed.Hostname(), "chatgpt.com") {
 		downloadTarget = parsed.RequestURI()
@@ -944,6 +1121,10 @@ func (h *ProxyHandler) streamDownload(c *gin.Context, metadata upstreamFileDownl
 	requestHeaders := make(http.Header)
 	requestHeaders.Set("Range", c.GetHeader("Range"))
 	requestHeaders.Set("If-Range", c.GetHeader("If-Range"))
+	if revalidate {
+		requestHeaders.Set("If-None-Match", c.GetHeader("If-None-Match"))
+		requestHeaders.Set("If-Modified-Since", c.GetHeader("If-Modified-Since"))
+	}
 	resp, err := h.client.OpenStream(c.Request.Context(), http.MethodGet, downloadTarget, "", requestHeaders)
 	if err != nil {
 		httpresp.Error(c, http.StatusBadGateway, fallback)
@@ -956,11 +1137,18 @@ func (h *ProxyHandler) streamDownload(c *gin.Context, metadata upstreamFileDownl
 			c.Header(name, value)
 		}
 	}
+	if revalidate && resp.StatusCode == http.StatusNotModified {
+		setDownloadCacheHeaders(c, true)
+		c.Status(http.StatusNotModified)
+		return
+	}
 	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		setDownloadCacheHeaders(c, false)
 		c.Status(resp.StatusCode)
 		return
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		setDownloadCacheHeaders(c, false)
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		writeProxyError(c, resp.StatusCode, body, fallback)
 		return
@@ -980,7 +1168,7 @@ func (h *ProxyHandler) streamDownload(c *gin.Context, metadata upstreamFileDownl
 	}
 	c.Header("Content-Type", contentType)
 	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": fileName}))
-	c.Header("Cache-Control", "private, no-store")
+	setDownloadCacheHeaders(c, revalidate)
 	c.Header("Referrer-Policy", "no-referrer")
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Status(resp.StatusCode)
@@ -988,6 +1176,15 @@ func (h *ProxyHandler) streamDownload(c *gin.Context, metadata upstreamFileDownl
 	if _, err := io.CopyBuffer(c.Writer, resp.Body, make([]byte, 64<<10)); err != nil && c.Request.Context().Err() == nil {
 		log.Printf("[Proxy] 文件流转发中断: %v", err)
 	}
+}
+
+func setDownloadCacheHeaders(c *gin.Context, revalidate bool) {
+	if revalidate {
+		c.Header("Cache-Control", "private, no-cache")
+		c.Writer.Header().Add("Vary", "Authorization")
+		return
+	}
+	c.Header("Cache-Control", "private, no-store")
 }
 
 func normalizeSandboxPath(value string) (string, bool) {
@@ -1008,27 +1205,6 @@ func normalizeSandboxPath(value string) (string, bool) {
 }
 
 func (h *ProxyHandler) doProxyBytes(ctx context.Context, method, path string, body []byte, contentType string) (int, []byte, error) {
-	if strings.HasPrefix(path, "https://") || strings.HasPrefix(path, "http://") {
-		req, err := http.NewRequestWithContext(ctx, method, path, bytes.NewReader(body))
-		if err != nil {
-			return 0, nil, err
-		}
-		req.Header.Set("Content-Type", contentType)
-		if method == http.MethodPut {
-			req.Header.Set("x-ms-blob-type", "BlockBlob")
-		}
-		resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
-		if err != nil {
-			return 0, nil, err
-		}
-		defer resp.Body.Close()
-		responseBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return 0, nil, err
-		}
-		return resp.StatusCode, responseBody, nil
-	}
-
 	req, err := h.client.BuildRequest(ctx, method, path, "", bytes.NewReader(body), contentType)
 	if err != nil {
 		return 0, nil, err
@@ -1038,9 +1214,12 @@ func (h *ProxyHandler) doProxyBytes(ctx context.Context, method, path string, bo
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(resp.Body)
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxControlResponseSize+1))
 	if err != nil {
 		return 0, nil, err
+	}
+	if len(responseBody) > maxControlResponseSize {
+		return 0, nil, errors.New("上游控制响应超过大小限制")
 	}
 	return resp.StatusCode, responseBody, nil
 }

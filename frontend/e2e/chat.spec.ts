@@ -327,8 +327,9 @@ test('输入框支持多文件上传、任意格式和图片预览', async ({ pa
   }));
   await page.route('**/api/files/upload-1/download', (route) => route.fulfill({ status: 200, contentType: 'image/png', body: png }));
   let uploadIndex = 0;
-  await page.route('**/api/files', async (route) => {
+  await page.route(/\/api\/files(?:\?.*)?$/, async (route) => {
     uploadIndex += 1;
+    expect(new URL(route.request().url()).searchParams.get('size_bytes')).toBe('4');
     const image = uploadIndex === 1;
     await route.fulfill({
       status: 200,

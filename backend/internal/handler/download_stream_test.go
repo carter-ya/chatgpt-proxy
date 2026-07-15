@@ -20,9 +20,11 @@ import (
 )
 
 type streamingDownloadClient struct {
-	reader        io.ReadCloser
-	streamHeaders http.Header
-	streamCalls   int
+	reader          io.ReadCloser
+	streamHeaders   http.Header
+	responseHeaders http.Header
+	streamStatus    int
+	streamCalls     int
 }
 
 func (client *streamingDownloadClient) BuildRequest(ctx context.Context, method, path, _ string, body io.Reader, _ string) (*http.Request, error) {
@@ -37,11 +39,22 @@ func (client *streamingDownloadClient) Do(request *http.Request) (*http.Response
 func (client *streamingDownloadClient) OpenStream(_ context.Context, _ string, _ string, _ string, headers http.Header) (*http.Response, error) {
 	client.streamCalls++
 	client.streamHeaders = headers.Clone()
+	status := client.streamStatus
+	if status == 0 {
+		status = http.StatusPartialContent
+	}
+	responseHeaders := client.responseHeaders.Clone()
+	if responseHeaders == nil {
+		responseHeaders = http.Header{"Content-Type": []string{"application/octet-stream"}, "Content-Length": []string{"5"}, "Content-Range": []string{"bytes 0-4/10"}, "Accept-Ranges": []string{"bytes"}, "Etag": []string{`"etag-new"`}, "Last-Modified": []string{"Wed, 15 Jul 2026 00:00:00 GMT"}}
+	}
+	reader := client.reader
+	if reader == nil {
+		reader = io.NopCloser(strings.NewReader(""))
+	}
 	return &http.Response{
-		StatusCode:    http.StatusPartialContent,
-		Header:        http.Header{"Content-Type": []string{"application/octet-stream"}, "Content-Length": []string{"5"}, "Content-Range": []string{"bytes 0-4/10"}, "Accept-Ranges": []string{"bytes"}},
-		Body:          client.reader,
-		ContentLength: 5,
+		StatusCode: status,
+		Header:     responseHeaders,
+		Body:       reader,
 	}, nil
 }
 
@@ -115,6 +128,8 @@ func TestDownloadFileStreamsBeforeUpstreamCompletesAndPreservesRange(t *testing.
 
 	request, _ := http.NewRequest(http.MethodGet, server.URL+"/api/files/file-a/download", nil)
 	request.Header.Set("Range", "bytes=0-4")
+	request.Header.Set("If-None-Match", `"etag-old"`)
+	request.Header.Set("If-Modified-Since", "Tue, 14 Jul 2026 00:00:00 GMT")
 	responseCh := make(chan *http.Response, 1)
 	errorCh := make(chan error, 1)
 	go func() {
@@ -141,6 +156,12 @@ func TestDownloadFileStreamsBeforeUpstreamCompletesAndPreservesRange(t *testing.
 	if client.streamHeaders.Get("Range") != "bytes=0-4" {
 		t.Fatalf("forwarded range = %q", client.streamHeaders.Get("Range"))
 	}
+	if client.streamHeaders.Get("If-None-Match") != `"etag-old"` || client.streamHeaders.Get("If-Modified-Since") == "" {
+		t.Fatalf("conditional headers = %#v", client.streamHeaders)
+	}
+	if response.Header.Get("Cache-Control") != "private, no-cache" || !strings.Contains(response.Header.Get("Vary"), "Authorization") {
+		t.Fatalf("cache headers = %#v", response.Header)
+	}
 
 	writeDone := make(chan error, 1)
 	go func() {
@@ -157,6 +178,63 @@ func TestDownloadFileStreamsBeforeUpstreamCompletesAndPreservesRange(t *testing.
 	}
 	if string(body) != "hello" {
 		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestDownloadFileReturnsNotModifiedForCachedPreview(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	client := &streamingDownloadClient{
+		streamStatus:    http.StatusNotModified,
+		responseHeaders: http.Header{"Etag": []string{`"etag-current"`}, "Last-Modified": []string{"Wed, 15 Jul 2026 00:00:00 GMT"}},
+	}
+	handler := NewProxyHandler(client, nil, ownedFileDB("user-a"))
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Set("user_id", "user-a")
+	ctx.Params = gin.Params{{Key: "id", Value: "file-a"}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/files/file-a/download", nil)
+	ctx.Request.Header.Set("If-None-Match", `"etag-current"`)
+
+	handler.DownloadFile(ctx)
+
+	if ctx.Writer.Status() != http.StatusNotModified || recorder.Body.Len() != 0 {
+		t.Fatalf("status=%d body=%q", ctx.Writer.Status(), recorder.Body.String())
+	}
+	if recorder.Header().Get("ETag") != `"etag-current"` || recorder.Header().Get("Cache-Control") != "private, no-cache" {
+		t.Fatalf("response headers = %#v", recorder.Header())
+	}
+	if client.streamHeaders.Get("If-None-Match") != `"etag-current"` {
+		t.Fatalf("forwarded conditional headers = %#v", client.streamHeaders)
+	}
+}
+
+func TestTicketDownloadRemainsNoStore(t *testing.T) {
+	codec, err := download.NewCodec(base64.StdEncoding.EncodeToString(make([]byte, 32)), 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, _, err := codec.Issue(download.Resource{Kind: "file", FileID: "file-a", UserID: "user-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &streamingDownloadClient{
+		streamStatus:    http.StatusOK,
+		responseHeaders: http.Header{"Content-Type": []string{"application/octet-stream"}, "Content-Length": []string{"0"}, "Etag": []string{`"etag-current"`}},
+	}
+	handler := NewProxyHandler(client, nil, ownedFileDB("user-a"), codec)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "ticket", Value: ticket}}
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/downloads/"+ticket, nil)
+	ctx.Request.Header.Set("If-None-Match", `"etag-current"`)
+
+	handler.DownloadWithTicket(ctx)
+
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "private, no-store" {
+		t.Fatalf("status=%d headers=%#v", recorder.Code, recorder.Header())
+	}
+	if client.streamHeaders.Get("If-None-Match") != "" {
+		t.Fatalf("ticket forwarded conditional headers = %#v", client.streamHeaders)
 	}
 }
 

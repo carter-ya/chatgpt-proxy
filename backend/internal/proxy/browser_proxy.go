@@ -207,7 +207,7 @@ func (c *BrowserProxyClient) OpenStream(ctx context.Context, method, path, _ str
 			"Content-Type": "application/octet-stream",
 		},
 	}
-	for _, name := range []string{"Range", "If-Range"} {
+	for _, name := range streamRequestHeaderNames {
 		if value := headers.Get(name); value != "" {
 			sidecarReq.Headers[name] = value
 		}

@@ -235,7 +235,9 @@ export const chat = {
   uploadFile: async (file: File): Promise<UploadedFile> => {
     const formData = new FormData();
     formData.append('file', file);
-    const res = await apiClient.post<UploadedFile>('/files', formData);
+    const res = await apiClient.post<UploadedFile>('/files', formData, {
+      params: { size_bytes: file.size },
+    });
     return res.data;
   },
 

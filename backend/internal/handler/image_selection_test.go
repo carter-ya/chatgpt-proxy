@@ -31,6 +31,14 @@ func (client *captureProxyClient) Do(request *http.Request) (*http.Response, err
 	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{}`)), Request: request}, nil
 }
 
+func (client *captureProxyClient) OpenStream(ctx context.Context, method, path, _ string, _ http.Header) (*http.Response, error) {
+	request, err := client.BuildRequest(ctx, method, path, "", nil, "application/octet-stream")
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(request)
+}
+
 func TestImageSelectionForwardsRequiredMessageIDs(t *testing.T) {
 	const owner = "user-a"
 	mockDB := &mockDBTX{queryRowFn: func(_ context.Context, sql string, args ...interface{}) pgx.Row {

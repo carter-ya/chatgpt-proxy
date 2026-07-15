@@ -174,18 +174,25 @@ test('助手生成文件链接通过鉴权接口下载且不跳转聊天页面',
     }),
   }));
 
-  let downloadURL = '';
+  let ticketBody: Record<string, string> = {};
   let authorization = '';
-  let releaseDownload: (() => void) | undefined;
-  await page.route(/\/api\/conversations\/files\/files\/download\?.+/, async (route) => {
-    const requestURL = new URL(route.request().url());
-    if (requestURL.searchParams.get('sandbox_path')?.endsWith('missing.zip')) {
+  let releaseTicket: (() => void) | undefined;
+  await page.route('**/api/download-tickets', async (route) => {
+    const body = route.request().postDataJSON() as Record<string, string>;
+    if (body.sandbox_path?.endsWith('missing.zip')) {
       await route.fulfill({ status: 502, contentType: 'application/json', body: '{"error":"missing"}' });
       return;
     }
-    downloadURL = route.request().url();
+    ticketBody = body;
     authorization = route.request().headers().authorization || '';
-    await new Promise<void>((resolve) => { releaseDownload = resolve; });
+    await new Promise<void>((resolve) => { releaseTicket = resolve; });
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ download_url: 'downloads/ticket-ppt', expires_at: '2026-07-12T00:10:00Z' }),
+    });
+  });
+  await page.route('**/api/downloads/ticket-ppt', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -200,11 +207,15 @@ test('助手生成文件链接通过鉴权接口下载且不跳转聊天页面',
   await expect(downloadLink).toHaveAttribute('href', 'sandbox:/mnt/data/%E6%B0%B4%E5%BE%AA%E7%8E%AF%E6%BC%94%E7%A4%BA.pptx');
   await downloadLink.click();
   await expect(downloadLink).toContainText('下载中');
-  releaseDownload?.();
-  await expect.poll(() => downloadURL).toContain('/api/conversations/files/files/download?');
-  const requested = new URL(downloadURL);
-  expect(requested.searchParams.get('message_id')).toBe('assistant-file');
-  expect(requested.searchParams.get('sandbox_path')).toBe('sandbox:/mnt/data/%E6%B0%B4%E5%BE%AA%E7%8E%AF%E6%BC%94%E7%A4%BA.pptx');
+  const nativeDownload = page.waitForEvent('download');
+  releaseTicket?.();
+  await expect((await nativeDownload).suggestedFilename()).toBe('水循环演示.pptx');
+  expect(ticketBody).toEqual({
+    kind: 'sandbox',
+    conversation_id: 'files',
+    message_id: 'assistant-file',
+    sandbox_path: 'sandbox:/mnt/data/%E6%B0%B4%E5%BE%AA%E7%8E%AF%E6%BC%94%E7%A4%BA.pptx',
+  });
   expect(authorization).toBe('Bearer e2e-token');
   await expect.poll(() => page.url()).toBe(initialURL);
 
@@ -235,12 +246,16 @@ test('新会话流式返回的文件链接使用上游会话和消息 ID 下载'
       messages: [{ id: 'assistant-stream', role: 'assistant', content }],
     }),
   }));
-  let messageId = '';
-  let sandboxPath = '';
-  await page.route(/\/api\/conversations\/stream-created\/files\/download\?.+/, async (route) => {
-    const requestURL = new URL(route.request().url());
-    messageId = requestURL.searchParams.get('message_id') || '';
-    sandboxPath = requestURL.searchParams.get('sandbox_path') || '';
+  let ticketBody: Record<string, string> = {};
+  await page.route('**/api/download-tickets', async (route) => {
+    ticketBody = route.request().postDataJSON() as Record<string, string>;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ download_url: 'downloads/ticket-xlsx', expires_at: '2026-07-12T00:10:00Z' }),
+    });
+  });
+  await page.route('**/api/downloads/ticket-xlsx', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -253,9 +268,15 @@ test('新会话流式返回的文件链接使用上游会话和消息 ID 下载'
   await page.getByPlaceholder('输入消息...').fill('生成一个表格');
   await page.getByRole('button', { name: '发送' }).click();
   await expect(page).toHaveURL(/\/chat\/stream-created$/);
+  const nativeDownload = page.waitForEvent('download');
   await page.getByRole('link', { name: '下载表格' }).click();
-  await expect.poll(() => messageId).toBe('assistant-stream');
-  expect(sandboxPath).toBe('sandbox:/mnt/data/result.xlsx');
+  await expect((await nativeDownload).suggestedFilename()).toBe('result.xlsx');
+  expect(ticketBody).toEqual({
+    kind: 'sandbox',
+    conversation_id: 'stream-created',
+    message_id: 'assistant-stream',
+    sandbox_path: 'sandbox:/mnt/data/result.xlsx',
+  });
 });
 
 test('新会话先显示临时标题再替换为上游标题', async ({ page }) => {

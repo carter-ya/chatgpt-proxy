@@ -12,6 +12,7 @@ import (
 	"chatgpt-proxy/backend/internal/auth"
 	"chatgpt-proxy/backend/internal/config"
 	"chatgpt-proxy/backend/internal/db"
+	"chatgpt-proxy/backend/internal/download"
 	"chatgpt-proxy/backend/internal/handler"
 	"chatgpt-proxy/backend/internal/httpresp"
 	"chatgpt-proxy/backend/internal/proxy"
@@ -59,7 +60,11 @@ func New(cfg *config.Config) (*App, error) {
 	}
 
 	proxyClient := proxy.NewBrowserProxyClient(cfg.SidecarURL, cfg.ChatGPTBaseURL)
-	proxyHandler := handler.NewProxyHandler(proxyClient, sessionManager, queries)
+	ticketCodec, err := download.NewCodec(cfg.EncryptionKey, 10*time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("初始化下载票据: %w", err)
+	}
+	proxyHandler := handler.NewProxyHandler(proxyClient, sessionManager, queries, ticketCodec)
 
 	engine := gin.New()
 	engine.Use(gin.Recovery(), gin.Logger())
@@ -67,6 +72,7 @@ func New(cfg *config.Config) (*App, error) {
 
 	api := engine.Group("/api")
 	api.GET("/health", health)
+	api.GET("/downloads/:ticket", proxyHandler.DownloadWithTicket)
 	RegisterAuthRoutes(api, authHandler)
 	protected := RegisterProtectedRoutes(api, cfg.JWTSecret)
 	protected.POST("/conversation", proxyHandler.Conversation)
@@ -75,6 +81,7 @@ func New(cfg *config.Config) (*App, error) {
 	protected.POST("/images/generations", proxyHandler.ImageGeneration)
 	protected.POST("/images/select", proxyHandler.ImageSelection)
 	protected.POST("/files", proxyHandler.UploadFile)
+	protected.POST("/download-tickets", proxyHandler.CreateDownloadTicket)
 	protected.GET("/files/:id/download", proxyHandler.DownloadFile)
 	protected.GET("/conversations", proxyHandler.ListConversations)
 	protected.GET("/conversations/:id/files/download", proxyHandler.DownloadSandboxFile)

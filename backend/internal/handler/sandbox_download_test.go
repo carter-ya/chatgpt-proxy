@@ -37,6 +37,15 @@ func (client *sandboxDownloadClient) Do(request *http.Request) (*http.Response, 
 	}, nil
 }
 
+func (client *sandboxDownloadClient) OpenStream(ctx context.Context, method, requestPath, _ string, headers http.Header) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, method, requestPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header = headers.Clone()
+	return http.DefaultClient.Do(request)
+}
+
 func sandboxDownloadContext(rawPath string) (*gin.Context, *httptest.ResponseRecorder) {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)

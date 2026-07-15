@@ -5,6 +5,7 @@ import { chromium, type Browser, type BrowserContext, type Disposable, type Page
 import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { BrowserRecoveryController } from './browserRecovery.js';
+import { startRawResponse, writeRawChunk } from './rawStreamBridge.js';
 
 // ---- Configuration ----
 
@@ -47,6 +48,7 @@ let isReady = false;
 let readyError: string | null = null;
 let lastChallengeOpenAt = 0;
 let streamChunkBinding: Disposable | null = null;
+let rawStreamBinding: Disposable | null = null;
 let recoveryController: BrowserRecoveryController | null = null;
 let browserWatchdogTimer: ReturnType<typeof setInterval> | null = null;
 let browserWatchdogRunning = false;
@@ -95,6 +97,12 @@ interface StreamImageGroup {
 
 const activeStreams = new Map<string, StreamState>();
 
+interface RawStreamState {
+  res: Response;
+}
+
+const activeRawStreams = new Map<string, RawStreamState>();
+
 function deleteActiveStream(streamId: string): void {
   const state = activeStreams.get(streamId);
   if (state) clearInterval(state.heartbeat);
@@ -108,6 +116,19 @@ function failActiveStreams(message: string): void {
       state.res.end();
     }
     deleteActiveStream(streamId);
+  }
+}
+
+function deleteActiveRawStream(streamId: string): void {
+  activeRawStreams.delete(streamId);
+}
+
+function failActiveRawStreams(message: string): void {
+  for (const [streamId, state] of activeRawStreams) {
+    if (!state.res.destroyed && !state.res.writableEnded) {
+      state.res.destroy(new Error(message));
+    }
+    deleteActiveRawStream(streamId);
   }
 }
 
@@ -479,6 +500,7 @@ function markReadyBrowserUnavailable(message: string): void {
   clearBrowserAuthCache();
   if (wasReady) {
     failActiveStreams(message);
+    failActiveRawStreams(message);
     console.warn(`[sidecar] ${message}`);
   }
 }
@@ -734,6 +756,10 @@ async function resetBrowserSession(): Promise<void> {
   if (streamChunkBinding) {
     await streamChunkBinding.dispose().catch(() => undefined);
     streamChunkBinding = null;
+  }
+  if (rawStreamBinding) {
+    await rawStreamBinding.dispose().catch(() => undefined);
+    rawStreamBinding = null;
   }
   await closeBrowserSession(session);
 }
@@ -1048,6 +1074,34 @@ async function initializeBrowser(): Promise<void> {
         if (tail) state.res.write(tail);
         state.res.end();
         deleteActiveStream(streamId);
+      }
+    },
+  );
+
+  rawStreamBinding = await page.exposeFunction(
+    '__sidecarRawStreamEvent',
+    async (streamId: string, event: { type: string; status?: number; headers?: Record<string, string>; chunk?: string; error?: string }) => {
+      const state = activeRawStreams.get(streamId);
+      if (!state || state.res.destroyed || state.res.writableEnded) return false;
+      switch (event.type) {
+      case 'start':
+        return startRawResponse(state.res, event.status || 502, event.headers || {});
+      case 'chunk':
+        return writeRawChunk(state.res, event.chunk || '');
+      case 'done':
+        state.res.end();
+        deleteActiveRawStream(streamId);
+        return true;
+      case 'error':
+        if (!state.res.headersSent) {
+          state.res.status(502).json({ error: event.error || 'Raw stream failed' });
+        } else {
+          state.res.destroy(new Error(event.error || 'Raw stream failed'));
+        }
+        deleteActiveRawStream(streamId);
+        return false;
+      default:
+        return false;
       }
     },
   );
@@ -2446,6 +2500,101 @@ async function handleNonStreamProxy(
   res.json(responsePayload);
 }
 
+/** Raw binary proxy: streams response bytes from the browser to Node in
+ * bounded base64 chunks. The exposed callback awaits Node's drain event, so
+ * backpressure propagates all the way to the browser ReadableStream. */
+async function handleRawStreamProxy(
+  page: Page,
+  method: string,
+  upstreamPath: string,
+  headers: Record<string, string>,
+  body: string | undefined,
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const streamId = randomUUID();
+  const isExternalUrl = /^https?:\/\//i.test(upstreamPath);
+  if (isExternalUrl) {
+    deleteHeader(headers, 'authorization');
+  } else {
+    await applyBrowserAuthHeaders(page, headers);
+  }
+
+  activeRawStreams.set(streamId, { res });
+  res.once('close', () => deleteActiveRawStream(streamId));
+
+  try {
+    const result = await page.evaluate(
+      async ({ streamId: id, url, method: requestMethod, headers: requestHeaders, bodyBase64 }) => {
+        const callback = (window as any).__sidecarRawStreamEvent as (
+          streamId: string,
+          event: { type: string; status?: number; headers?: Record<string, string>; chunk?: string; error?: string },
+        ) => Promise<boolean>;
+        const bytesToBase64 = (bytes: Uint8Array): string => {
+          let binary = '';
+          for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+            const chunk = bytes.subarray(offset, Math.min(offset + 0x8000, bytes.length));
+            binary += String.fromCharCode(...chunk);
+          }
+          return btoa(binary);
+        };
+        try {
+          const options: RequestInit = {
+            method: requestMethod || 'GET',
+            headers: requestHeaders || {},
+            credentials: 'include' as RequestCredentials,
+          };
+          if (bodyBase64 && requestMethod !== 'GET' && requestMethod !== 'HEAD') {
+            const binary = atob(bodyBase64);
+            const requestBytes = new Uint8Array(binary.length);
+            for (let index = 0; index < binary.length; index++) requestBytes[index] = binary.charCodeAt(index);
+            options.body = requestBytes;
+          }
+          const response = await fetch(url, options);
+          const responseHeaders: Record<string, string> = {};
+          response.headers.forEach((value, key) => { responseHeaders[key] = value; });
+          const cfChallenge = response.headers.get('cf-mitigated') === 'challenge';
+          if (!await callback(id, { type: 'start', status: response.status, headers: responseHeaders })) {
+            await response.body?.cancel();
+            return { cfChallenge };
+          }
+          const reader = response.body?.getReader();
+          if (reader) {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              for (let offset = 0; offset < value.length; offset += 64 * 1024) {
+                const chunk = value.subarray(offset, Math.min(offset + 64 * 1024, value.length));
+                if (!await callback(id, { type: 'chunk', chunk: bytesToBase64(chunk) })) {
+                  await reader.cancel();
+                  return { cfChallenge };
+                }
+              }
+            }
+          }
+          await callback(id, { type: 'done' });
+          return { cfChallenge };
+        } catch (error: any) {
+          await callback(id, { type: 'error', error: error?.message || String(error) });
+          return { cfChallenge: false };
+        }
+      },
+      { streamId, url: upstreamPath, method, headers, bodyBase64: body },
+    );
+    if (result.cfChallenge) await openCloudflareChallengePage(page, upstreamPath);
+  } catch (error) {
+    const state = activeRawStreams.get(streamId);
+    if (state && !state.res.destroyed && !state.res.writableEnded) {
+      if (!state.res.headersSent) {
+        state.res.status(502).json({ error: 'Raw stream failed', detail: String(error) });
+      } else {
+        state.res.destroy(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    deleteActiveRawStream(streamId);
+  }
+}
+
 /** Streaming SSE proxy: evaluate fetch() in browser, relay chunks via exposed callback. */
 async function handleStreamProxy(
   page: Page,
@@ -3023,7 +3172,7 @@ function startServer(): void {
 
     const page = proxyPage;
 
-    const isStream = req.query.stream === 'true';
+    const streamMode = typeof req.query.stream === 'string' ? req.query.stream : '';
     const { method, path: upstreamPath, headers, body } = req.body as ProxyRequestBody;
 
     if (!upstreamPath) {
@@ -3032,10 +3181,20 @@ function startServer(): void {
     }
 
     try {
-      if (isStream) {
+      if (streamMode === 'true') {
         await handleStreamProxy(
           page,
           method || 'POST',
+          upstreamPath,
+          headers || {},
+          body,
+          req,
+          res,
+        );
+      } else if (streamMode === 'raw') {
+        await handleRawStreamProxy(
+          page,
+          method || 'GET',
           upstreamPath,
           headers || {},
           body,
@@ -3134,6 +3293,7 @@ async function shutdown(): Promise<void> {
     sentinelRefreshTimer = null;
   }
   failActiveStreams('Sidecar is shutting down.');
+  failActiveRawStreams('Sidecar is shutting down.');
   await resetBrowserSession();
 }
 

@@ -18,10 +18,12 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"chatgpt-proxy/backend/internal/db"
+	"chatgpt-proxy/backend/internal/download"
 	"chatgpt-proxy/backend/internal/httpresp"
 	"chatgpt-proxy/backend/internal/proxy"
 	"chatgpt-proxy/backend/internal/session"
@@ -36,14 +38,20 @@ type ProxyHandler struct {
 	client         proxy.ProxyClient
 	sessionManager *session.Manager
 	queries        *db.Queries
+	ticketCodec    *download.Codec
 }
 
 // NewProxyHandler creates a new ProxyHandler.
-func NewProxyHandler(client proxy.ProxyClient, sessionManager *session.Manager, queries *db.Queries) *ProxyHandler {
+func NewProxyHandler(client proxy.ProxyClient, sessionManager *session.Manager, queries *db.Queries, ticketCodec ...*download.Codec) *ProxyHandler {
+	var codec *download.Codec
+	if len(ticketCodec) > 0 {
+		codec = ticketCodec[0]
+	}
 	return &ProxyHandler{
 		client:         client,
 		sessionManager: sessionManager,
 		queries:        queries,
+		ticketCodec:    codec,
 	}
 }
 
@@ -752,151 +760,234 @@ func (h *ProxyHandler) UploadFile(c *gin.Context) {
 	})
 }
 
-// DownloadFile proxies file bytes through the authenticated sidecar session.
-func (h *ProxyHandler) DownloadFile(c *gin.Context) {
-	fileID := strings.TrimSpace(c.Param("id"))
-	if fileID == "" {
-		httpresp.Error(c, http.StatusBadRequest, "文件 ID 不能为空")
+type createDownloadTicketRequest struct {
+	Kind           string `json:"kind"`
+	FileID         string `json:"file_id"`
+	ConversationID string `json:"conversation_id"`
+	MessageID      string `json:"message_id"`
+	SandboxPath    string `json:"sandbox_path"`
+}
+
+// CreateDownloadTicket exchanges the caller's bearer token for a short-lived,
+// resource-scoped URL that browsers can download natively without buffering a Blob.
+func (h *ProxyHandler) CreateDownloadTicket(c *gin.Context) {
+	if h.ticketCodec == nil {
+		httpresp.Error(c, http.StatusServiceUnavailable, "下载票据服务不可用")
 		return
 	}
 	userID, ok := authenticatedUserID(c)
 	if !ok {
 		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
+	var request createDownloadTicketRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		httpresp.Error(c, http.StatusBadRequest, "下载票据参数无效")
+		return
+	}
+
+	resource := download.Resource{Kind: request.Kind, UserID: userID}
+	switch request.Kind {
+	case "file":
+		resource.FileID = strings.TrimSpace(request.FileID)
+		if resource.FileID == "" {
+			httpresp.Error(c, http.StatusBadRequest, "文件 ID 不能为空")
+			return
+		}
+		if !h.requireFileOwner(c, resource.FileID, userID) {
+			return
+		}
+	case "sandbox":
+		resource.ConversationID = strings.TrimSpace(request.ConversationID)
+		resource.MessageID = strings.TrimSpace(request.MessageID)
+		var valid bool
+		resource.SandboxPath, valid = normalizeSandboxPath(strings.TrimSpace(request.SandboxPath))
+		if resource.ConversationID == "" || resource.MessageID == "" || !valid {
+			httpresp.Error(c, http.StatusBadRequest, "会话 ID、消息 ID 或 sandbox 文件路径无效")
+			return
+		}
+		if !h.requireConversationOwner(c, resource.ConversationID, userID) {
+			return
+		}
+	default:
+		httpresp.Error(c, http.StatusBadRequest, "不支持的下载资源类型")
+		return
+	}
+
+	ticket, expiresAt, err := h.ticketCodec.Issue(resource)
+	if err != nil {
+		httpresp.Error(c, http.StatusInternalServerError, "创建下载票据失败")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"download_url": "downloads/" + ticket,
+		"expires_at":   expiresAt.Format(time.RFC3339),
+	})
+}
+
+// DownloadWithTicket validates an opaque ticket and streams its bound resource.
+func (h *ProxyHandler) DownloadWithTicket(c *gin.Context) {
+	if h.ticketCodec == nil {
+		httpresp.Error(c, http.StatusServiceUnavailable, "下载票据服务不可用")
+		return
+	}
+	resource, err := h.ticketCodec.Parse(strings.TrimSpace(c.Param("ticket")))
+	if err != nil {
+		if errors.Is(err, download.ErrExpiredTicket) {
+			httpresp.Error(c, http.StatusGone, "下载链接已过期")
+			return
+		}
+		httpresp.Error(c, http.StatusNotFound, "下载链接无效")
+		return
+	}
+	switch resource.Kind {
+	case "file":
+		h.serveFileDownload(c, resource.FileID, resource.UserID)
+	case "sandbox":
+		h.serveSandboxDownload(c, resource.ConversationID, resource.MessageID, resource.SandboxPath, resource.UserID)
+	default:
+		httpresp.Error(c, http.StatusNotFound, "下载链接无效")
+	}
+}
+
+// DownloadFile streams an owned file through the authenticated upstream session.
+func (h *ProxyHandler) DownloadFile(c *gin.Context) {
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
+	h.serveFileDownload(c, strings.TrimSpace(c.Param("id")), userID)
+}
+
+func (h *ProxyHandler) serveFileDownload(c *gin.Context, fileID, userID string) {
+	if fileID == "" {
+		httpresp.Error(c, http.StatusBadRequest, "文件 ID 不能为空")
 		return
 	}
 	if !h.requireFileOwner(c, fileID, userID) {
 		return
 	}
-
-	path := "/backend-api/files/download/" + url.PathEscape(fileID)
-	req, err := h.client.BuildRequest(c.Request.Context(), http.MethodGet, path, "", nil, "application/octet-stream")
-	if err != nil {
-		httpresp.Error(c, http.StatusInternalServerError, "构建文件下载请求失败")
+	metadataPath := "/backend-api/files/download/" + url.PathEscape(fileID)
+	metadata, ok := h.readDownloadMetadata(c, metadataPath, "获取文件下载地址失败")
+	if !ok {
 		return
-	}
-	resp, err := h.client.Do(req)
-	if err != nil {
-		httpresp.Error(c, http.StatusBadGateway, "下载上游文件失败")
-		return
-	}
-	metadataBody, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		httpresp.Error(c, http.StatusBadGateway, "读取文件下载信息失败")
-		return
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		writeProxyError(c, resp.StatusCode, metadataBody, "获取文件下载地址失败")
-		return
-	}
-
-	var metadata upstreamFileDownloadResponse
-	if err := json.Unmarshal(metadataBody, &metadata); err != nil || metadata.DownloadURL == "" {
-		httpresp.Error(c, http.StatusBadGateway, "上游未返回有效的文件下载地址")
-		return
-	}
-
-	downloadTarget := metadata.DownloadURL
-	if parsed, parseErr := url.Parse(metadata.DownloadURL); parseErr == nil && strings.EqualFold(parsed.Hostname(), "chatgpt.com") {
-		downloadTarget = parsed.RequestURI()
-	}
-	downloadStatus, fileBytes, err := h.doProxyBytes(c.Request.Context(), http.MethodGet, downloadTarget, nil, "application/octet-stream")
-	if err != nil {
-		httpresp.Error(c, http.StatusBadGateway, "下载文件内容失败")
-		return
-	}
-	if downloadStatus < 200 || downloadStatus >= 300 {
-		writeProxyError(c, downloadStatus, fileBytes, "下载文件内容失败")
-		return
-	}
-
-	contentType := metadata.MIMEType
-	if contentType == "" && len(fileBytes) > 0 {
-		contentType = http.DetectContentType(fileBytes)
-	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
 	}
 	fileName := filepath.Base(metadata.FileName)
 	if fileName == "." || fileName == "" {
 		fileName = fileID
 	}
-	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": fileName}))
-	c.Data(http.StatusOK, contentType, fileBytes)
+	h.streamDownload(c, metadata, fileName, "下载文件内容失败")
 }
 
-// DownloadSandboxFile resolves an assistant-generated sandbox path through the
-// conversation interpreter endpoint and proxies the resulting file bytes.
+// DownloadSandboxFile streams an assistant-generated sandbox path.
 func (h *ProxyHandler) DownloadSandboxFile(c *gin.Context) {
-	conversationID := strings.TrimSpace(c.Param("id"))
-	messageID := strings.TrimSpace(c.Query("message_id"))
-	rawSandboxPath := strings.TrimSpace(c.Query("sandbox_path"))
-	if conversationID == "" || messageID == "" || rawSandboxPath == "" {
-		httpresp.Error(c, http.StatusBadRequest, "会话 ID、消息 ID 和文件路径不能为空")
-		return
-	}
-
-	sandboxPath, ok := normalizeSandboxPath(rawSandboxPath)
-	if !ok {
-		httpresp.Error(c, http.StatusBadRequest, "无效的 sandbox 文件路径")
-		return
-	}
 	userID, ok := authenticatedUserID(c)
 	if !ok {
 		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
 		return
 	}
+	sandboxPath, valid := normalizeSandboxPath(strings.TrimSpace(c.Query("sandbox_path")))
+	if !valid {
+		httpresp.Error(c, http.StatusBadRequest, "无效的 sandbox 文件路径")
+		return
+	}
+	h.serveSandboxDownload(c, strings.TrimSpace(c.Param("id")), strings.TrimSpace(c.Query("message_id")), sandboxPath, userID)
+}
+
+func (h *ProxyHandler) serveSandboxDownload(c *gin.Context, conversationID, messageID, sandboxPath, userID string) {
+	if conversationID == "" || messageID == "" || sandboxPath == "" {
+		httpresp.Error(c, http.StatusBadRequest, "会话 ID、消息 ID 和文件路径不能为空")
+		return
+	}
 	if !h.requireConversationOwner(c, conversationID, userID) {
 		return
 	}
-
 	query := url.Values{}
 	query.Set("message_id", messageID)
 	query.Set("sandbox_path", sandboxPath)
 	metadataPath := "/backend-api/conversation/" + url.PathEscape(conversationID) + "/interpreter/download?" + query.Encode()
-	metadataStatus, metadataBody, err := h.doProxyBytes(c.Request.Context(), http.MethodGet, metadataPath, nil, "application/json")
-	if err != nil {
-		httpresp.Error(c, http.StatusBadGateway, "获取 sandbox 文件下载地址失败")
+	metadata, ok := h.readDownloadMetadata(c, metadataPath, "获取 sandbox 文件下载地址失败")
+	if !ok {
 		return
-	}
-	if metadataStatus < http.StatusOK || metadataStatus >= http.StatusMultipleChoices {
-		writeProxyError(c, metadataStatus, metadataBody, "获取 sandbox 文件下载地址失败")
-		return
-	}
-
-	var metadata upstreamFileDownloadResponse
-	if err := json.Unmarshal(metadataBody, &metadata); err != nil || metadata.DownloadURL == "" {
-		httpresp.Error(c, http.StatusBadGateway, "上游未返回有效的 sandbox 文件下载地址")
-		return
-	}
-
-	downloadTarget := metadata.DownloadURL
-	if parsed, parseErr := url.Parse(metadata.DownloadURL); parseErr == nil && strings.EqualFold(parsed.Hostname(), "chatgpt.com") {
-		downloadTarget = parsed.RequestURI()
-	}
-	downloadStatus, fileBytes, err := h.doProxyBytes(c.Request.Context(), http.MethodGet, downloadTarget, nil, "application/octet-stream")
-	if err != nil {
-		httpresp.Error(c, http.StatusBadGateway, "下载 sandbox 文件内容失败")
-		return
-	}
-	if downloadStatus < http.StatusOK || downloadStatus >= http.StatusMultipleChoices {
-		writeProxyError(c, downloadStatus, fileBytes, "下载 sandbox 文件内容失败")
-		return
-	}
-
-	contentType := metadata.MIMEType
-	if contentType == "" && len(fileBytes) > 0 {
-		contentType = http.DetectContentType(fileBytes)
-	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
 	}
 	fileName := filepath.Base(metadata.FileName)
 	if fileName == "." || fileName == "" {
 		fileName = path.Base(sandboxPath)
 	}
+	h.streamDownload(c, metadata, fileName, "下载 sandbox 文件内容失败")
+}
+
+func (h *ProxyHandler) readDownloadMetadata(c *gin.Context, metadataPath, fallback string) (upstreamFileDownloadResponse, bool) {
+	status, body, err := h.doProxyBytes(c.Request.Context(), http.MethodGet, metadataPath, nil, "application/json")
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, fallback)
+		return upstreamFileDownloadResponse{}, false
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		writeProxyError(c, status, body, fallback)
+		return upstreamFileDownloadResponse{}, false
+	}
+	var metadata upstreamFileDownloadResponse
+	if err := json.Unmarshal(body, &metadata); err != nil || metadata.DownloadURL == "" {
+		httpresp.Error(c, http.StatusBadGateway, "上游未返回有效的文件下载地址")
+		return upstreamFileDownloadResponse{}, false
+	}
+	return metadata, true
+}
+
+func (h *ProxyHandler) streamDownload(c *gin.Context, metadata upstreamFileDownloadResponse, fileName, fallback string) {
+	downloadTarget := metadata.DownloadURL
+	if parsed, err := url.Parse(metadata.DownloadURL); err == nil && strings.EqualFold(parsed.Hostname(), "chatgpt.com") {
+		downloadTarget = parsed.RequestURI()
+	}
+	requestHeaders := make(http.Header)
+	requestHeaders.Set("Range", c.GetHeader("Range"))
+	requestHeaders.Set("If-Range", c.GetHeader("If-Range"))
+	resp, err := h.client.OpenStream(c.Request.Context(), http.MethodGet, downloadTarget, "", requestHeaders)
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, fallback)
+		return
+	}
+	defer resp.Body.Close()
+
+	for _, name := range []string{"Accept-Ranges", "Content-Range", "ETag", "Last-Modified"} {
+		if value := resp.Header.Get(name); value != "" {
+			c.Header(name, value)
+		}
+	}
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		c.Status(resp.StatusCode)
+		return
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		writeProxyError(c, resp.StatusCode, body, fallback)
+		return
+	}
+
+	contentType := metadata.MIMEType
+	if contentType == "" {
+		contentType = resp.Header.Get("Content-Type")
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	if length := resp.Header.Get("Content-Length"); length != "" {
+		c.Header("Content-Length", length)
+	} else if resp.StatusCode == http.StatusOK && metadata.FileSize > 0 {
+		c.Header("Content-Length", strconv.FormatInt(metadata.FileSize, 10))
+	}
+	c.Header("Content-Type", contentType)
 	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": fileName}))
-	c.Data(http.StatusOK, contentType, fileBytes)
+	c.Header("Cache-Control", "private, no-store")
+	c.Header("Referrer-Policy", "no-referrer")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Status(resp.StatusCode)
+	c.Writer.Flush()
+	if _, err := io.CopyBuffer(c.Writer, resp.Body, make([]byte, 64<<10)); err != nil && c.Request.Context().Err() == nil {
+		log.Printf("[Proxy] 文件流转发中断: %v", err)
+	}
 }
 
 func normalizeSandboxPath(value string) (string, bool) {

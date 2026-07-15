@@ -1,4 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
 
@@ -347,6 +349,57 @@ test('新会话先显示临时标题再替换为上游标题', async ({ page }) 
   await expect(page.locator('.conversation-item')).toContainText('雨的形成过程');
 });
 
+test('新会话收到 ID 后立即更新地址并可在生成中刷新恢复', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+  let releaseResponse: (() => void) | undefined;
+  const conversationServer = createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      // Consume the request before starting the delayed SSE response.
+    }
+    response.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Access-Control-Allow-Origin': '*',
+    });
+    response.write('data: {"conversation_id":"recoverable-chat"}\n\n');
+    await new Promise<void>((resolve) => { releaseResponse = resolve; });
+    response.end('data: {"content":"最终回答"}\n\ndata: [DONE]\n\n');
+  });
+  await new Promise<void>((resolve) => conversationServer.listen(0, '127.0.0.1', resolve));
+  const conversationServerURL = `http://127.0.0.1:${(conversationServer.address() as AddressInfo).port}`;
+  await page.route('**/api/conversation', async (route) => {
+    const requestURL = new URL(route.request().url());
+    await route.continue({ url: `${conversationServerURL}${requestURL.pathname}${requestURL.search}` });
+  });
+  await page.route('**/api/conversations/recoverable-chat', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      conversation: { id: 'recoverable-chat', title: '可恢复会话', model: 'gpt-5-6-thinking' },
+      messages: [{ id: 'recovered-message', role: 'assistant', content: '刷新后恢复的内容' }],
+    }),
+  }));
+
+  try {
+    await page.goto('/chat');
+    await page.getByPlaceholder('输入消息...').fill('执行长任务');
+    await page.getByRole('button', { name: '发送' }).click();
+
+    await expect(page).toHaveURL(/\/chat\/recoverable-chat$/);
+    await expect(page.getByText('正在思考…', { exact: true })).toBeVisible();
+    await expect(page.getByText('刷新后恢复的内容', { exact: true })).toHaveCount(0);
+
+    await page.reload();
+    await expect(page).toHaveURL(/\/chat\/recoverable-chat$/);
+    await expect(page.getByText('刷新后恢复的内容', { exact: true })).toBeVisible();
+  } finally {
+    releaseResponse?.();
+    await new Promise<void>((resolve, reject) => conversationServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test('输入框支持多文件上传、任意格式和图片预览', async ({ page }) => {
   await authenticate(page);
   await mockModels(page);
@@ -396,41 +449,181 @@ test('输入框支持多文件上传、任意格式和图片预览', async ({ pa
   expect(conversationBody.attachments).toHaveLength(2);
 });
 
+test('文件上传期间可以排队发送，并在全部上传成功后自动发送一次', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+  const releases: Array<() => void> = [];
+  let uploadIndex = 0;
+  const uploadServer = createServer(async (request, response) => {
+    const currentUpload = ++uploadIndex;
+    for await (const _chunk of request) {
+      // Consume the body before pausing so XMLHttpRequest reaches processing state.
+    }
+    await new Promise<void>((resolve) => releases.push(resolve));
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({
+      file_id: `queued-upload-${currentUpload}`,
+      file_name: `queued-${currentUpload}.txt`,
+      mime_type: 'text/plain',
+      size_bytes: 5,
+      download_url: `/api/files/queued-upload-${currentUpload}/download`,
+    }));
+  });
+  await new Promise<void>((resolve) => uploadServer.listen(0, '127.0.0.1', resolve));
+  const uploadServerURL = `http://127.0.0.1:${(uploadServer.address() as AddressInfo).port}`;
+  await page.route(/\/api\/files(?:\?.*)?$/, async (route) => {
+    const requestURL = new URL(route.request().url());
+    await route.continue({ url: `${uploadServerURL}${requestURL.pathname}${requestURL.search}` });
+  });
+  let conversationRequests = 0;
+  let conversationBody: Record<string, unknown> = {};
+  await page.route('**/api/conversation', async (route) => {
+    conversationRequests += 1;
+    conversationBody = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: {"content":"已自动发送"}\n\ndata: [DONE]\n\n' });
+  });
+
+  try {
+    await page.goto('/chat');
+    await page.locator('input[type=file]').setInputFiles([
+      { name: 'first.txt', mimeType: 'text/plain', buffer: Buffer.from('first') },
+      { name: 'second.txt', mimeType: 'text/plain', buffer: Buffer.from('second') },
+    ]);
+    const processingUploads = page.locator('.file-preview-item.uploading').filter({ hasText: '正在处理文件…' });
+    await expect(processingUploads).toHaveCount(2);
+    await expect.poll(() => releases.length).toBe(2);
+
+    const textarea = page.getByPlaceholder('输入消息...');
+    const sendButton = page.getByRole('button', { name: '发送' });
+    await textarea.fill('等待文件后发送');
+    await expect(sendButton).toBeEnabled();
+    await expect(page.getByTitle('点击发送，文件上传完成后将自动发送')).toBeVisible();
+    await sendButton.click();
+
+    await expect(sendButton).toBeDisabled();
+    await expect(page.getByTitle('已排队，文件上传完成后自动发送')).toBeVisible();
+    await expect(textarea).toBeDisabled();
+    await expect(page.getByRole('combobox', { name: '选择模型' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: '上传文件' })).toBeDisabled();
+    expect(conversationRequests).toBe(0);
+
+    releases[0]();
+    await expect(processingUploads).toHaveCount(1);
+    expect(conversationRequests).toBe(0);
+    releases[1]();
+
+    await expect(page.getByText('已自动发送')).toBeVisible();
+    expect(conversationRequests).toBe(1);
+    expect(conversationBody.message).toBe('等待文件后发送');
+    expect(conversationBody.attachments).toHaveLength(2);
+  } finally {
+    releases.forEach((release) => release());
+    await new Promise<void>((resolve, reject) => uploadServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test('排队发送期间上传失败会取消发送并保留草稿', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+  let releaseUpload: (() => void) | undefined;
+  const uploadServer = createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      // Consume the body before returning the delayed failure.
+    }
+    await new Promise<void>((resolve) => { releaseUpload = resolve; });
+    response.writeHead(503, { 'Content-Type': 'application/json' });
+    response.end('{"error":"temporarily unavailable"}');
+  });
+  await new Promise<void>((resolve) => uploadServer.listen(0, '127.0.0.1', resolve));
+  const uploadServerURL = `http://127.0.0.1:${(uploadServer.address() as AddressInfo).port}`;
+  await page.route(/\/api\/files(?:\?.*)?$/, async (route) => {
+    const requestURL = new URL(route.request().url());
+    await route.continue({ url: `${uploadServerURL}${requestURL.pathname}${requestURL.search}` });
+  });
+  let conversationRequests = 0;
+  await page.route('**/api/conversation', async (route) => {
+    conversationRequests += 1;
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: [DONE]\n\n' });
+  });
+
+  try {
+    await page.goto('/chat');
+    await page.locator('input[type=file]').setInputFiles({
+      name: 'will-fail.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('failure'),
+    });
+    await expect(page.locator('.file-preview-item.uploading')).toContainText('正在处理文件…');
+    const textarea = page.getByPlaceholder('输入消息...');
+    const sendButton = page.getByRole('button', { name: '发送' });
+    await textarea.fill('失败后保留这段文字');
+    await sendButton.click();
+    await expect(textarea).toBeDisabled();
+
+    releaseUpload?.();
+    await expect(page.getByText('上传失败', { exact: true })).toBeVisible();
+    await expect(textarea).toBeEnabled();
+    await expect(textarea).toHaveValue('失败后保留这段文字');
+    await expect(sendButton).toBeEnabled();
+    expect(conversationRequests).toBe(0);
+  } finally {
+    releaseUpload?.();
+    await new Promise<void>((resolve, reject) => uploadServer.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test('文件上传失败后可以原地重试', async ({ page }) => {
   await authenticate(page);
   await mockModels(page);
   await mockEmptyConversations(page);
   let uploadAttempts = 0;
   let releaseRetry: (() => void) | undefined;
+  const uploadServer = createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      // Consume the request body so XMLHttpRequest reports upload completion.
+    }
+    await new Promise<void>((resolve) => { releaseRetry = resolve; });
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ file_id: 'retried-upload', file_name: 'retry.txt', mime_type: 'text/plain', size_bytes: 5, download_url: '/api/files/retried-upload/download' }));
+  });
+  await new Promise<void>((resolve) => uploadServer.listen(0, '127.0.0.1', resolve));
+  const uploadServerURL = `http://127.0.0.1:${(uploadServer.address() as AddressInfo).port}`;
   await page.route(/\/api\/files(?:\?.*)?$/, async (route) => {
     uploadAttempts += 1;
     if (uploadAttempts === 1) {
       await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"temporarily unavailable"}' });
       return;
     }
-    await new Promise<void>((resolve) => { releaseRetry = resolve; });
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ file_id: 'retried-upload', file_name: 'retry.txt', mime_type: 'text/plain', size_bytes: 5, download_url: '/api/files/retried-upload/download' }),
+    const requestURL = new URL(route.request().url());
+    await route.continue({ url: `${uploadServerURL}${requestURL.pathname}${requestURL.search}` });
+  });
+
+  try {
+    await page.goto('/chat');
+    await page.locator('input[type=file]').setInputFiles({
+      name: 'retry.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('retry'),
     });
-  });
 
-  await page.goto('/chat');
-  await page.locator('input[type=file]').setInputFiles({
-    name: 'retry.txt',
-    mimeType: 'text/plain',
-    buffer: Buffer.from('retry'),
-  });
-
-  await expect(page.getByText('上传失败', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '重试', exact: true }).click();
-  await expect(page.getByText(/上传中 \d+%/)).toBeVisible();
-  await expect(page.getByLabel(/retry\.txt 上传进度 \d+%/)).toBeVisible();
-  releaseRetry?.();
-  await expect(page.getByText('retry.txt')).toBeVisible();
-  await expect(page.getByText('上传失败', { exact: true })).toHaveCount(0);
-  expect(uploadAttempts).toBe(2);
+    await expect(page.getByText('上传失败', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '重试', exact: true }).click();
+    const processingUpload = page.locator('.file-preview-item.uploading').filter({ hasText: '正在处理文件…' });
+    await expect(processingUpload).toBeVisible();
+    await expect(processingUpload).not.toContainText('上传中 100%');
+    const spinnerBox = await processingUpload.locator('.spinner').boundingBox();
+    expect(spinnerBox).not.toBeNull();
+    expect(Math.abs(spinnerBox!.width - spinnerBox!.height)).toBeLessThanOrEqual(1);
+    releaseRetry?.();
+    await expect(page.getByText('retry.txt')).toBeVisible();
+    await expect(page.getByText('上传失败', { exact: true })).toHaveCount(0);
+    expect(uploadAttempts).toBe(2);
+  } finally {
+    releaseRetry?.();
+    await new Promise<void>((resolve, reject) => uploadServer.close((error) => error ? reject(error) : resolve()));
+  }
 });
 
 test('流式连接技术错误显示为可操作的用户提示', async ({ page }) => {
@@ -451,24 +644,110 @@ test('流式连接技术错误显示为可操作的用户提示', async ({ page 
   await expect(page.locator('.chat-message.assistant')).not.toContainText('Timed out');
 });
 
-test('生成过程中只显示一个思考状态块', async ({ page }) => {
+test('生成过程中可以准备下一条消息但不能提前发送', async ({ page }) => {
   await authenticate(page);
   await mockModels(page);
   await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{"items":[],"total":0}' }));
+  await page.route(/\/api\/files(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ file_id: 'next-upload', file_name: 'next.txt', mime_type: 'text/plain', size_bytes: 4, download_url: '/api/files/next-upload/download' }),
+  }));
   let releaseResponse: (() => void) | undefined;
+  const conversationBodies: Array<Record<string, unknown>> = [];
   await page.route('**/api/conversation', async (route) => {
-    await new Promise<void>((resolve) => { releaseResponse = resolve; });
-    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: {"content":"完成"}\n\ndata: [DONE]\n\n' });
+    conversationBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    if (conversationBodies.length === 1) {
+      await new Promise<void>((resolve) => { releaseResponse = resolve; });
+    }
+    const content = conversationBodies.length === 1 ? '第一条完成' : '第二条完成';
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: `data: ${JSON.stringify({ content })}\n\ndata: [DONE]\n\n` });
   });
 
   await page.goto('/chat');
-  await page.getByPlaceholder('输入消息...').fill('测试思考状态');
+  const textarea = page.getByPlaceholder('输入消息...');
+  await textarea.fill('测试思考状态');
   await page.getByRole('button', { name: '发送' }).click();
   await expect(page.getByText('正在思考…', { exact: true })).toHaveCount(1);
   await expect(page.locator('.reasoning-panel')).toHaveCount(1);
   await expect(page.locator('.assistant-working')).toHaveCount(0);
+  await expect(textarea).toBeEnabled();
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '上传文件' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '停止生成' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '发送', exact: true })).toHaveCount(0);
+
+  await textarea.fill('下一条草稿');
+  await textarea.press('Enter');
+  await expect(textarea).toHaveValue('下一条草稿\n');
+  expect(conversationBodies).toHaveLength(1);
+  await page.getByRole('combobox', { name: '选择模型' }).selectOption('gpt-5-5-instant|');
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'next.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('next'),
+  });
+  await expect(page.getByText('next.txt')).toBeVisible();
+
   releaseResponse?.();
-  await expect(page.getByText('完成', { exact: true })).toBeVisible();
+  await expect(page.getByText('第一条完成', { exact: true })).toBeVisible();
+  await expect(textarea).toHaveValue('下一条草稿\n');
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toHaveValue('gpt-5-5-instant|');
+  const sendButton = page.getByRole('button', { name: '发送', exact: true });
+  await expect(sendButton).toBeEnabled();
+  await sendButton.click();
+
+  await expect(page.getByText('第二条完成', { exact: true })).toBeVisible();
+  expect(conversationBodies).toHaveLength(2);
+  expect(conversationBodies[1]).toMatchObject({
+    message: '下一条草稿',
+    model: 'gpt-5-5-instant',
+    attachments: [expect.objectContaining({ file_id: 'next-upload' })],
+  });
+});
+
+test('停止生成后保留生成期间输入的草稿', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+  let releaseFirstResponse: (() => void) | undefined;
+  let firstRouteFinished = false;
+  const conversationBodies: Array<Record<string, unknown>> = [];
+  await page.route('**/api/conversation', async (route) => {
+    conversationBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    if (conversationBodies.length === 1) {
+      await new Promise<void>((resolve) => { releaseFirstResponse = resolve; });
+      try {
+        await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: {"content":"已取消的结果"}\n\ndata: [DONE]\n\n' });
+      } catch {
+        // The browser request is expected to be aborted by the stop button.
+      } finally {
+        firstRouteFinished = true;
+      }
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: {"content":"草稿已发送"}\n\ndata: [DONE]\n\n' });
+  });
+
+  await page.goto('/chat');
+  const textarea = page.getByPlaceholder('输入消息...');
+  await textarea.fill('开始一个长任务');
+  await page.getByRole('button', { name: '发送' }).click();
+  await textarea.fill('停止后仍要保留');
+  await page.getByRole('button', { name: '停止生成' }).click();
+
+  await expect(textarea).toBeEnabled();
+  await expect(textarea).toHaveValue('停止后仍要保留');
+  const sendButton = page.getByRole('button', { name: '发送', exact: true });
+  await expect(sendButton).toBeEnabled();
+  releaseFirstResponse?.();
+  await expect.poll(() => firstRouteFinished).toBe(true);
+  await sendButton.click();
+
+  await expect(page.getByText('草稿已发送', { exact: true })).toBeVisible();
+  await expect(page.getByText('已取消的结果', { exact: true })).toHaveCount(0);
+  expect(conversationBodies).toHaveLength(2);
+  expect(conversationBodies[1].message).toBe('停止后仍要保留');
 });
 
 test('移动端点击图片导航后自动关闭侧栏', async ({ page }) => {

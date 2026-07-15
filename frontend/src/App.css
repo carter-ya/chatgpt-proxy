@@ -914,6 +914,15 @@ input, textarea {
   cursor: not-allowed;
 }
 
+.send-button-hint {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.send-button-hint.queued .send-btn {
+  pointer-events: none;
+}
+
 .file-preview {
   padding: 20px 24px 0;
   max-width: 800px;
@@ -1018,6 +1027,9 @@ input, textarea {
 .spinner {
   width: 20px;
   height: 20px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  aspect-ratio: 1;
   border: 2px solid #4d4d5e;
   border-top-color: #ececf1;
   border-radius: 50%;

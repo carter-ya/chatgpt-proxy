@@ -52,6 +52,7 @@ export default function ChatPage() {
       if (!newConversation || pendingConversationRef.current === id) return;
       pendingConversationRef.current = id;
       announceConversation(id, initialMessage, 'chat');
+      navigate(`/chat/${id}`, { replace: true });
       void refreshConversationTitle(id);
     },
     onToken: (content: string) => updateStreamingMessage((message) => ({ ...message, content })),
@@ -68,9 +69,7 @@ export default function ChatPage() {
     onDone: () => {
       updateStreamingMessage((message) => ({ ...message, streaming: false, status: '', durationSeconds: Math.max(1, Math.round((Date.now() - startedAtRef.current) / 1000)) }));
       streamMessageRef.current = null;
-      const pending = pendingConversationRef.current;
       pendingConversationRef.current = null;
-      if (pending && newConversation) navigate(`/chat/${pending}`, { replace: true });
       void loadConversations();
     },
     onError: (error: Error) => {
@@ -83,6 +82,10 @@ export default function ChatPage() {
   useEffect(() => {
     setActiveConversationId(conversationId || '');
     if (!conversationId) { setMessages([]); setLoadError(''); return; }
+    if (pendingConversationRef.current === conversationId && streamMessageRef.current) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setLoadError('');
     void chat.getConversation(conversationId).then(({ data }) => {

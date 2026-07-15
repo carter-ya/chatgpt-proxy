@@ -38,6 +38,10 @@ const BROWSER_AUTH_CACHE_TTL_MS = parseInt(
   process.env.CHATGPT_PROXY_BROWSER_AUTH_CACHE_TTL_MS || '60000',
   10,
 );
+const FINAL_RESPONSE_POLL_TIMEOUT_MS = Math.max(
+  30_000,
+  parseInt(process.env.CHATGPT_PROXY_FINAL_RESPONSE_TIMEOUT_MS || '900000', 10) || 900_000,
+);
 
 // ---- Global State ----
 
@@ -2691,7 +2695,7 @@ async function handleStreamProxy(
   // __sidecarStreamChunk for each chunk.
   page
     .evaluate(
-      async ({ method, path: p, headers: hdrs, body: b, streamId: sid, imageMode }) => {
+      async ({ method, path: p, headers: hdrs, body: b, streamId: sid, imageMode, finalPollTimeoutMs }) => {
         const win = window as any;
         // page.evaluate runs in the browser realm and cannot close over helper
         // functions declared in the Node/sidecar realm. Keep final-snapshot
@@ -2927,8 +2931,9 @@ async function handleStreamProxy(
               let finalSnapshotSent = false;
               let lastAsyncStatusError = '';
               let lastDetailError = '';
-              const maxPollAttempts = imageMode ? 165 : 30;
-              for (let attempt = 0; attempt < maxPollAttempts; attempt++) {
+              let lastProgressUpdateAt = 0;
+              const pollStartedAt = Date.now();
+              while (Date.now() - pollStartedAt < finalPollTimeoutMs) {
                 const authEntry = Object.entries(hdrs || {}).find(
                   ([key]) => key.toLowerCase() === 'authorization',
                 );
@@ -3072,6 +3077,14 @@ async function handleStreamProxy(
                 } else {
                   lastDetailError = `HTTP ${detailResp.status}: ${(await detailResp.text().catch(() => '')).slice(0, 200)}`;
                 }
+                if (Date.now() - lastProgressUpdateAt >= 10_000) {
+                  await win.__sidecarStreamChunk(
+                    sid,
+                    `data: ${JSON.stringify({ status: imageMode ? '图片仍在生成，请稍候…' : '正在等待完整响应，请稍候…' })}\n\n`,
+                    false,
+                  );
+                  lastProgressUpdateAt = Date.now();
+                }
                 await new Promise((resolve) => setTimeout(resolve, 1000));
               }
               if (!finalSnapshotSent) {
@@ -3079,9 +3092,10 @@ async function handleStreamProxy(
                   lastAsyncStatusError && `async-status ${lastAsyncStatusError}`,
                   lastDetailError && `conversation detail ${lastDetailError}`,
                 ].filter(Boolean).join('; ');
+                console.warn(`Final response polling timed out${details ? `: ${details}` : ''}`);
                 await win.__sidecarStreamChunk(
                   sid,
-                  `event: error\ndata: ${imageMode ? 'Timed out waiting for the current image generation to finish' : 'Timed out waiting for the completed response'}${details ? `: ${details}` : ''}\n\n`,
+                  `event: error\ndata: ${imageMode ? '图片生成时间较长，结果可能仍在处理中。请稍后重新打开此对话查看，或点击重试。' : '响应时间较长，结果可能仍在处理中。请稍后重新打开此对话查看，或点击重试。'}\n\n`,
                   false,
                 );
               }
@@ -3110,6 +3124,7 @@ async function handleStreamProxy(
         body: decodedBody,
         streamId,
         imageMode: decodedBody?.includes('"picture_v2"') ?? false,
+        finalPollTimeoutMs: FINAL_RESPONSE_POLL_TIMEOUT_MS,
       },
     )
     .then((result) => {

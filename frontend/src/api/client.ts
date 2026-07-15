@@ -232,11 +232,19 @@ export const chat = {
     body: JSON.stringify({ assistant_message_id: assistantMessageId, model, thinking_effort: thinkingEffort }),
   }),
 
-  uploadFile: async (file: File): Promise<UploadedFile> => {
+  uploadFile: async (file: File, onProgress?: (percentage: number) => void): Promise<UploadedFile> => {
     const formData = new FormData();
     formData.append('file', file);
     const res = await apiClient.post<UploadedFile>('/files', formData, {
       params: { size_bytes: file.size },
+      onUploadProgress: onProgress ? (event) => {
+        const ratio = typeof event.progress === 'number'
+          ? event.progress
+          : event.total
+            ? event.loaded / event.total
+            : 0;
+        onProgress(Math.min(100, Math.max(0, Math.round(ratio * 100))));
+      } : undefined,
     });
     return res.data;
   },

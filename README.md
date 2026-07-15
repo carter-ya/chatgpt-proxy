@@ -151,6 +151,7 @@ make migrate-down ALL=true
 | `CHATGPT_PROXY_CHROME_USER_DATA_DIR` | 否 | `sidecar/.browser-profile` | Chrome 用户数据目录 |
 | `CHATGPT_PROXY_CHROME_PROFILE_DIRECTORY` | 否 | `Default` | Chrome profile 名称 |
 | `CHATGPT_PROXY_CHROME_PROXY_SERVER` | 否 | 无 | Chrome 显式代理地址 |
+| `CHATGPT_PROXY_FINAL_RESPONSE_TIMEOUT_MS` | 否 | `900000` | 长任务最终结果轮询时间（毫秒） |
 
 ## 使用说明
 

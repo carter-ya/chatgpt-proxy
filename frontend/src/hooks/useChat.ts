@@ -30,6 +30,16 @@ interface UseChatReturn {
   cancelStream: () => void;
 }
 
+function userFacingStreamError(message: string): string {
+  if (/Timed out waiting for|SSE.*(?:超时|中断|错误|终止)|No response body/i.test(message)) {
+    return '响应连接中断，结果可能仍在处理中。请稍后重新打开此对话查看，或点击重试。';
+  }
+  if (/Browser fetch failed|Resume HTTP|Cloudflare challenge/i.test(message)) {
+    return '与 ChatGPT 的连接暂时中断，请完成浏览器验证后重试。';
+  }
+  return message;
+}
+
 export function useChat(): UseChatReturn {
   const [sending, setSending] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -177,7 +187,9 @@ export function useChat(): UseChatReturn {
       params.onDone?.(fullContent);
     } catch (err) {
       if ((err as Error).name === 'AbortError') return;
-      params.onError?.(err instanceof Error ? err : new Error(String(err)));
+      const error = err instanceof Error ? err : new Error(String(err));
+      console.error('[chat stream]', error);
+      params.onError?.(new Error(userFacingStreamError(error.message)));
     } finally {
       abortRef.current = null;
       setSending(false);

@@ -29,6 +29,40 @@ async function mockEmptyConversations(page: Page) {
   }));
 }
 
+test('进入聊天页面时每个初始化接口只请求一次', async ({ page }) => {
+  await authenticate(page);
+  const requests = { models: 0, conversations: 0, detail: 0 };
+  await page.route('**/api/models', async (route) => {
+    requests.models += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ default_model: 'gpt-5-6-thinking', options: [{ label: '5.6 高', model: 'gpt-5-6-thinking', thinking_effort: 'extended' }] }),
+    });
+  });
+  await page.route(/\/api\/conversations(?:\?.*)?$/, async (route) => {
+    requests.conversations += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ items: [{ id: 'request-once', title: '单次请求', model: 'gpt-5-6-thinking', updated_at: '2026-07-15T00:00:00Z', kind: 'chat' }], total: 1 }),
+    });
+  });
+  await page.route('**/api/conversations/request-once', async (route) => {
+    requests.detail += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ conversation: { id: 'request-once', title: '单次请求', model: 'gpt-5-6-thinking' }, messages: [{ id: 'answer', role: 'assistant', content: '初始化完成' }] }),
+    });
+  });
+
+  await page.goto('/chat/request-once');
+  await expect(page.getByText('初始化完成')).toBeVisible();
+  await page.waitForTimeout(200);
+  expect(requests).toEqual({ models: 1, conversations: 1, detail: 1 });
+});
+
 test('模型选择按账号持久化并在聊天与图片页共享', async ({ page }) => {
   await authenticate(page);
   await mockModels(page);
@@ -360,6 +394,61 @@ test('输入框支持多文件上传、任意格式和图片预览', async ({ pa
   await expect(page.locator('.chat-message.user .message-file-card')).toContainText('archive.xyz');
   await expect(page.locator('.chat-message.user .message-file-card')).toContainText('2.0 KB');
   expect(conversationBody.attachments).toHaveLength(2);
+});
+
+test('文件上传失败后可以原地重试', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+  let uploadAttempts = 0;
+  let releaseRetry: (() => void) | undefined;
+  await page.route(/\/api\/files(?:\?.*)?$/, async (route) => {
+    uploadAttempts += 1;
+    if (uploadAttempts === 1) {
+      await route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"temporarily unavailable"}' });
+      return;
+    }
+    await new Promise<void>((resolve) => { releaseRetry = resolve; });
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ file_id: 'retried-upload', file_name: 'retry.txt', mime_type: 'text/plain', size_bytes: 5, download_url: '/api/files/retried-upload/download' }),
+    });
+  });
+
+  await page.goto('/chat');
+  await page.locator('input[type=file]').setInputFiles({
+    name: 'retry.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from('retry'),
+  });
+
+  await expect(page.getByText('上传失败', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '重试', exact: true }).click();
+  await expect(page.getByText(/上传中 \d+%/)).toBeVisible();
+  await expect(page.getByLabel(/retry\.txt 上传进度 \d+%/)).toBeVisible();
+  releaseRetry?.();
+  await expect(page.getByText('retry.txt')).toBeVisible();
+  await expect(page.getByText('上传失败', { exact: true })).toHaveCount(0);
+  expect(uploadAttempts).toBe(2);
+});
+
+test('流式连接技术错误显示为可操作的用户提示', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+  await page.route('**/api/conversation', (route) => route.fulfill({
+    status: 200,
+    contentType: 'text/event-stream',
+    body: 'event: error\ndata: SSE 流读取超时\n\ndata: [DONE]\n\n',
+  }));
+
+  await page.goto('/chat');
+  await page.getByPlaceholder('输入消息...').fill('执行一个长任务');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect(page.getByText(/响应连接中断，结果可能仍在处理中/)).toBeVisible();
+  await expect(page.locator('.chat-message.assistant')).not.toContainText('SSE');
+  await expect(page.locator('.chat-message.assistant')).not.toContainText('Timed out');
 });
 
 test('生成过程中只显示一个思考状态块', async ({ page }) => {

@@ -118,6 +118,23 @@ func TestArchiveDoesNotChangeLocalStateWhenUpstreamFails(t *testing.T) {
 	}
 }
 
+func TestConversationAsyncStatusUsesOwnedUpstreamConversation(t *testing.T) {
+	mockDB := &mockDBTX{
+		queryRowFn: func(context.Context, string, ...interface{}) pgx.Row { return ownedConversationRow("user-a") },
+	}
+	client := &conversationMutationClient{}
+	handler := NewProxyHandler(client, nil, db.New(mockDB))
+	ctx, recorder := mutationContext(http.MethodPost, nil)
+	handler.ConversationAsyncStatus(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if client.method != http.MethodPost || client.path != "/backend-api/conversation/conversation-1/async-status" || client.body != `{}` {
+		t.Fatalf("upstream async status = %s %s %s", client.method, client.path, client.body)
+	}
+}
+
 func TestListConversationsPreservesSidecarUnavailableStatus(t *testing.T) {
 	queryCalled := false
 	mockDB := &mockDBTX{queryFn: func(context.Context, string, ...interface{}) (pgx.Rows, error) {

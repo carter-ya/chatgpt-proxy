@@ -442,6 +442,297 @@ test('新会话收到 ID 后立即更新地址并可在生成中刷新恢复', a
   }
 });
 
+test('不同会话可以并发生成且消息和取消状态彼此隔离', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  const conversations = [
+    { id: 'parallel-a', title: '并发任务 A', model: 'gpt-5-6-thinking', updated_at: '2026-07-16T02:00:00Z', kind: 'chat' },
+    { id: 'parallel-b', title: '并发任务 B', model: 'gpt-5-6-thinking', updated_at: '2026-07-16T01:00:00Z', kind: 'chat' },
+  ];
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ items: conversations, total: conversations.length }),
+  }));
+  await page.route(/\/api\/conversations\/parallel-[ab]$/, (route) => {
+    const id = route.request().url().endsWith('parallel-a') ? 'parallel-a' : 'parallel-b';
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ conversation: { id, title: id, model: 'gpt-5-6-thinking' }, messages: [] }),
+    });
+  });
+  await page.route(/\/api\/conversations\/parallel-[ab]\/async-status$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: '{}',
+  }));
+
+  let releaseA: (() => void) | undefined;
+  let releaseB: (() => void) | undefined;
+  await page.route('**/api/conversation', async (route) => {
+    const body = route.request().postDataJSON() as { conversation_id: string };
+    await new Promise<void>((resolve) => {
+      if (body.conversation_id === 'parallel-a') releaseA = resolve;
+      else releaseB = resolve;
+    });
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: `data: {"content":"${body.conversation_id === 'parallel-a' ? 'A 已完成' : 'B 已完成'}"}\n\ndata: [DONE]\n\n`,
+    });
+  });
+
+  await page.goto('/chat/parallel-a');
+  await page.getByPlaceholder('输入消息...').fill('运行 A');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect.poll(() => Boolean(releaseA)).toBe(true);
+
+  await page.getByText('并发任务 B', { exact: true }).click();
+  await page.getByPlaceholder('输入消息...').fill('运行 B');
+  await expect(page.getByRole('button', { name: '发送' })).toBeEnabled();
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect.poll(() => Boolean(releaseB)).toBe(true);
+
+  releaseB?.();
+  await expect(page.getByText('B 已完成')).toBeVisible();
+  await page.getByText('并发任务 A', { exact: true }).click();
+  releaseA?.();
+  await expect(page.getByText('A 已完成')).toBeVisible();
+});
+
+test('上游待交互状态显示圆点并在打开会话后确认', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  let acknowledged = false;
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      items: [{ id: 'needs-review', title: '待查看回复', model: 'gpt-5-6-thinking', updated_at: '2026-07-16T03:00:00Z', kind: 'chat', async_status: acknowledged ? null : 4 }],
+      total: 1,
+    }),
+  }));
+  await page.route('**/api/conversations/needs-review/async-status', async (route) => {
+    acknowledged = true;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{"status":"OK"}' });
+  });
+  await page.route(/\/api\/conversations\/needs-review$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      conversation: { id: 'needs-review', title: '待查看回复', model: 'gpt-5-6-thinking' },
+      messages: [{ id: 'review-answer', role: 'assistant', content: '后台回复内容' }],
+    }),
+  }));
+
+  await page.goto('/chat');
+  await expect(page.locator('.conversation-item .conv-attention')).toHaveAttribute('aria-label', '有新回复');
+  await page.getByText('待查看回复', { exact: true }).click();
+  await expect(page.getByText('后台回复内容')).toBeVisible();
+  await expect.poll(() => acknowledged).toBe(true);
+  await expect(page.locator('.conversation-item .conv-attention')).toHaveCount(0);
+});
+
+test('页面失焦时完成任务会发送不含正文的系统通知', async ({ page }) => {
+  await page.addInitScript(() => {
+    const notifications: Array<{ title: string; body?: string }> = [];
+    class FakeNotification {
+      static permission = 'granted';
+      static requestPermission = async () => 'granted';
+      onclick: (() => void) | null = null;
+      constructor(public title: string, public options?: NotificationOptions) {
+        notifications.push({ title, body: options?.body });
+      }
+      close() {}
+    }
+    Object.defineProperty(window, 'Notification', { configurable: true, value: FakeNotification });
+    Object.defineProperty(window, '__testNotifications', { configurable: true, value: notifications });
+  });
+  await authenticate(page);
+  await mockModels(page);
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ items: [{ id: 'notify-chat', title: '通知测试', model: 'gpt-5-6-thinking', updated_at: '2026-07-16T03:00:00Z', kind: 'chat', async_status: 4 }], total: 1 }),
+  }));
+  await page.route(/\/api\/conversations\/notify-chat$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ conversation: { id: 'notify-chat', title: '通知测试', model: 'gpt-5-6-thinking' }, messages: [] }),
+  }));
+  let release: (() => void) | undefined;
+  await page.route('**/api/conversation', async (route) => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: {"content":"私密回答正文"}\n\ndata: [DONE]\n\n' });
+  });
+
+  await page.goto('/chat/notify-chat');
+  await page.getByPlaceholder('输入消息...').fill('后台执行');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect.poll(() => Boolean(release)).toBe(true);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+  });
+  release?.();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __testNotifications: Array<{ title: string; body?: string }> }).__testNotifications)).toEqual([
+    { title: '通知测试', body: '回复已完成' },
+  ]);
+});
+
+test('切换会话后后台完成不会被误认为当前会话并提前确认', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  let completedA = false;
+  let acknowledgedA = false;
+  const items = () => [
+    { id: 'background-a', title: '后台任务 A', model: 'gpt-5-6-thinking', updated_at: '2026-07-16T04:00:00Z', kind: 'chat', async_status: completedA ? 4 : null },
+    { id: 'foreground-b', title: '当前会话 B', model: 'gpt-5-6-thinking', updated_at: '2026-07-16T03:00:00Z', kind: 'chat', async_status: null },
+  ];
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ items: items(), total: 2 }),
+  }));
+  await page.route(/\/api\/conversations\/(?:background-a|foreground-b)$/, (route) => {
+    const id = route.request().url().endsWith('background-a') ? 'background-a' : 'foreground-b';
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ conversation: { id, title: id, model: 'gpt-5-6-thinking' }, messages: [] }) });
+  });
+  await page.route('**/api/conversations/background-a/async-status', async (route) => {
+    acknowledgedA = true;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+  });
+  let release: (() => void) | undefined;
+  await page.route('**/api/conversation', async (route) => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    completedA = true;
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: {"content":"后台完成"}\n\ndata: [DONE]\n\n' });
+  });
+
+  await page.goto('/chat/background-a');
+  await page.getByPlaceholder('输入消息...').fill('执行后台任务');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect.poll(() => Boolean(release)).toBe(true);
+  await page.getByText('当前会话 B', { exact: true }).click();
+  release?.();
+
+  const backgroundItem = page.locator('.conversation-item').filter({ hasText: '后台任务 A' });
+  await expect(backgroundItem.locator('.conv-attention')).toHaveAttribute('aria-label', '有新回复');
+  expect(acknowledgedA).toBe(false);
+});
+
+test('离开新会话草稿后延迟返回的会话 ID 不抢占当前页面', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await mockEmptyConversations(page);
+  let release: (() => void) | undefined;
+  await page.route('**/api/conversation', async (route) => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/event-stream',
+      body: 'data: {"conversation_id":"delayed-created"}\n\ndata: {"content":"已完成"}\n\ndata: [DONE]\n\n',
+    });
+  });
+
+  await page.goto('/chat');
+  await page.getByPlaceholder('输入消息...').fill('延迟创建');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect.poll(() => Boolean(release)).toBe(true);
+  await page.getByRole('button', { name: '图片', exact: true }).click();
+  await expect(page).toHaveURL(/\/images$/);
+  release?.();
+  await page.waitForTimeout(200);
+  await expect(page).toHaveURL(/\/images$/);
+});
+
+test('系统通知构造失败不会把成功回复改判为失败', async ({ page }) => {
+  await page.addInitScript(() => {
+    class ThrowingNotification {
+      static permission = 'granted';
+      static requestPermission = async () => 'granted';
+      constructor() { throw new Error('notifications unavailable'); }
+    }
+    Object.defineProperty(window, 'Notification', { configurable: true, value: ThrowingNotification });
+  });
+  await authenticate(page);
+  await mockModels(page);
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ items: [{ id: 'notification-throws', title: '通知异常', model: 'gpt-5-6-thinking', updated_at: '2026-07-16T05:00:00Z', kind: 'chat' }], total: 1 }),
+  }));
+  await page.route(/\/api\/conversations\/notification-throws$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ conversation: { id: 'notification-throws', title: '通知异常', model: 'gpt-5-6-thinking' }, messages: [] }),
+  }));
+  let release: (() => void) | undefined;
+  await page.route('**/api/conversation', async (route) => {
+    await new Promise<void>((resolve) => { release = resolve; });
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: {"content":"成功结果"}\n\ndata: [DONE]\n\n' });
+  });
+
+  await page.goto('/chat/notification-throws');
+  await page.getByPlaceholder('输入消息...').fill('执行');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect.poll(() => Boolean(release)).toBe(true);
+  await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }));
+  release?.();
+  await expect(page.getByText('成功结果')).toBeVisible();
+  await expect(page.locator('.conv-attention.error')).toHaveCount(0);
+});
+
+test('先恢复焦点后收到的待交互列表状态仍会被确认', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  let completed = false;
+  let listRefreshStarted = false;
+  let releaseList: (() => void) | undefined;
+  const listGate = new Promise<void>((resolve) => { releaseList = resolve; });
+  await page.route(/\/api\/conversations(?:\?.*)?$/, async (route) => {
+    if (completed) {
+      listRefreshStarted = true;
+      await listGate;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ items: [{ id: 'focus-race', title: '焦点竞态', model: 'gpt-5-6-thinking', updated_at: '2026-07-16T06:00:00Z', kind: 'chat', async_status: completed ? 4 : null }], total: 1 }),
+    });
+  });
+  await page.route(/\/api\/conversations\/focus-race$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ conversation: { id: 'focus-race', title: '焦点竞态', model: 'gpt-5-6-thinking' }, messages: [] }),
+  }));
+  let acknowledged = false;
+  await page.route('**/api/conversations/focus-race/async-status', async (route) => {
+    acknowledged = true;
+    await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+  });
+  let releaseStream: (() => void) | undefined;
+  await page.route('**/api/conversation', async (route) => {
+    await new Promise<void>((resolve) => { releaseStream = resolve; });
+    completed = true;
+    await route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: {"content":"竞态完成"}\n\ndata: [DONE]\n\n' });
+  });
+
+  await page.goto('/chat/focus-race');
+  await page.getByPlaceholder('输入消息...').fill('执行');
+  await page.getByRole('button', { name: '发送' }).click();
+  await expect.poll(() => Boolean(releaseStream)).toBe(true);
+  await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }));
+  releaseStream?.();
+  await expect.poll(() => listRefreshStarted).toBe(true);
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  releaseList?.();
+  await expect.poll(() => acknowledged).toBe(true);
+});
+
 test('输入框支持多文件上传、任意格式和图片预览', async ({ page }) => {
   await authenticate(page);
   await mockModels(page);

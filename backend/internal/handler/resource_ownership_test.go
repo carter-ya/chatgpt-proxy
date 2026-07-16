@@ -99,7 +99,7 @@ func TestFilterConversationsByOwnerNeverAutoClaims(t *testing.T) {
 		return &ownershipRows{ids: []string{"owned"}}, nil
 	}}
 	handler := &ProxyHandler{queries: db.New(mockDB)}
-	upstream := []byte(`{"items":[{"id":"owned","title":"Mine"},{"id":"unknown","title":"Shared"}],"total":2}`)
+	upstream := []byte(`{"items":[{"id":"owned","title":"Mine","async_status":4},{"id":"unknown","title":"Shared"}],"total":2}`)
 	filtered, err := handler.filterConversationsByOwner(context.Background(), upstream, "user-a")
 	if err != nil {
 		t.Fatal(err)
@@ -110,6 +110,9 @@ func TestFilterConversationsByOwnerNeverAutoClaims(t *testing.T) {
 	}
 	if strings.Contains(result, `"id":"unknown"`) {
 		t.Fatalf("unknown conversation leaked: %s", result)
+	}
+	if !strings.Contains(result, `"async_status":4`) {
+		t.Fatalf("upstream async status was not preserved: %s", result)
 	}
 }
 

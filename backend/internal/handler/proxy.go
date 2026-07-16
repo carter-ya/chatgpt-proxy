@@ -12,6 +12,7 @@ import (
 	_ "image/png"
 	"io"
 	"log"
+	"math/rand"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"chatgpt-proxy/backend/internal/db"
@@ -40,6 +42,9 @@ type ProxyHandler struct {
 	sessionManager *session.Manager
 	queries        *db.Queries
 	ticketCodec    *download.Codec
+	modelCatalogMu sync.RWMutex
+	modelCatalog   apiModelCatalog
+	modelCatalogOK bool
 }
 
 // NewProxyHandler creates a new ProxyHandler.
@@ -154,72 +159,280 @@ type apiSource struct {
 
 type apiModelOption struct {
 	Label          string `json:"label"`
+	Title          string `json:"title,omitempty"`
+	Description    string `json:"description,omitempty"`
 	Model          string `json:"model"`
+	ModelLabel     string `json:"model_label,omitempty"`
 	ThinkingEffort string `json:"thinking_effort,omitempty"`
 	Lane           string `json:"lane,omitempty"`
+}
+
+type apiModelVersion struct {
+	ID                    string           `json:"id"`
+	Label                 string           `json:"label"`
+	ShortLabel            string           `json:"short_label,omitempty"`
+	DisplayText           string           `json:"display_text,omitempty"`
+	Tooltip               string           `json:"tooltip,omitempty"`
+	Badge                 string           `json:"badge,omitempty"`
+	Model                 string           `json:"model"`
+	DefaultThinkingEffort string           `json:"default_thinking_effort,omitempty"`
+	Options               []apiModelOption `json:"options"`
+}
+
+type apiModelCatalog struct {
+	Title              string            `json:"title,omitempty"`
+	DefaultModel       string            `json:"default_model"`
+	ModelPickerVersion int               `json:"model_picker_version,omitempty"`
+	UpdatedAt          string            `json:"updated_at,omitempty"`
+	Versions           []apiModelVersion `json:"versions"`
+	Options            []apiModelOption  `json:"options"`
+}
+
+type upstreamModelCatalog struct {
+	Title              string `json:"title"`
+	DefaultModel       string `json:"default_model_slug"`
+	ModelPickerVersion int    `json:"model_picker_version"`
+	Models             []struct {
+		Slug                  string `json:"slug"`
+		Title                 string `json:"title"`
+		Description           string `json:"description"`
+		DefaultThinkingEffort string `json:"default_thinking_effort"`
+		ThinkingEfforts       []struct {
+			ThinkingEffort string `json:"thinking_effort"`
+			FullLabel      string `json:"full_label"`
+			ShortLabel     string `json:"short_label"`
+			Description    string `json:"description"`
+		} `json:"thinking_efforts"`
+	} `json:"models"`
+	Versions []struct {
+		ID                              string   `json:"id"`
+		DisplayText                     string   `json:"display_text"`
+		DisplayTextFull                 string   `json:"display_text_full"`
+		DisplayTextForIntelligence      string   `json:"display_text_for_intelligence"`
+		ShortDisplayTextForIntelligence string   `json:"short_display_text_for_intelligence"`
+		Tooltip                         string   `json:"tooltip"`
+		Slugs                           []string `json:"slugs"`
+		Enabled                         bool     `json:"enabled"`
+		Presets                         []struct {
+			Label          string `json:"selected_display_title"`
+			Title          string `json:"title"`
+			Model          string `json:"model_slug"`
+			ThinkingEffort string `json:"thinking_effort"`
+			Lane           string `json:"lane"`
+			PresetType     string `json:"preset_type"`
+		} `json:"intelligence_presets"`
+	} `json:"versions"`
 }
 
 // Models returns the models and thinking presets available to the logged-in
 // ChatGPT browser account.
 func (h *ProxyHandler) Models(c *gin.Context) {
-	req, err := h.client.BuildRequest(c.Request.Context(), http.MethodGet, "/backend-api/models", "", nil, "application/json")
-	if err != nil {
-		httpresp.Error(c, http.StatusInternalServerError, "构建模型目录请求失败")
+	h.modelCatalogMu.RLock()
+	catalog, ok := h.modelCatalog, h.modelCatalogOK
+	h.modelCatalogMu.RUnlock()
+	if !ok {
+		c.Header("Retry-After", "2")
+		httpresp.Error(c, http.StatusServiceUnavailable, "模型目录正在准备中")
 		return
+	}
+	c.Header("Cache-Control", "private, max-age=30")
+	c.JSON(http.StatusOK, catalog)
+}
+
+// RunModelCatalogRefresh maintains a last-known-good in-memory snapshot so
+// browser clients never wait for the comparatively slow Chrome upstream call.
+func (h *ProxyHandler) RunModelCatalogRefresh(ctx context.Context, minInterval, maxInterval time.Duration) {
+	consecutiveFailures := 0
+	for {
+		refreshCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		err := h.refreshModelCatalog(refreshCtx)
+		cancel()
+		delay := randomDuration(minInterval, maxInterval)
+		if err != nil {
+			consecutiveFailures++
+			log.Printf("[models] 刷新模型目录失败，继续使用最近一次成功结果: %v", err)
+			retryBase := 5 * time.Second
+			for attempt := 1; attempt < consecutiveFailures && attempt < 4; attempt++ {
+				retryBase *= 2
+			}
+			delay = randomDuration(retryBase, retryBase+retryBase/2)
+		} else {
+			consecutiveFailures = 0
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func (h *ProxyHandler) refreshModelCatalog(ctx context.Context) error {
+	req, err := h.client.BuildRequest(ctx, http.MethodGet, "/backend-api/models", "", nil, "application/json")
+	if err != nil {
+		return fmt.Errorf("构建模型目录请求: %w", err)
 	}
 	resp, err := h.client.Do(req)
 	if err != nil {
-		httpresp.Error(c, http.StatusBadGateway, "读取模型目录失败")
-		return
+		return fmt.Errorf("读取模型目录: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return fmt.Errorf("读取模型目录响应: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		writeProxyError(c, resp.StatusCode, body, "读取模型目录失败")
-		return
+		return fmt.Errorf("模型目录上游 HTTP %d: %.200s", resp.StatusCode, body)
 	}
-	var raw struct {
-		DefaultModel string `json:"default_model_slug"`
-		Versions     []struct {
-			ID      string `json:"id"`
-			Enabled bool   `json:"enabled"`
-			Presets []struct {
-				Label          string `json:"selected_display_title"`
-				Title          string `json:"title"`
-				Model          string `json:"model_slug"`
-				ThinkingEffort string `json:"thinking_effort"`
-				Lane           string `json:"lane"`
-				PresetType     string `json:"preset_type"`
-			} `json:"intelligence_presets"`
-		} `json:"versions"`
+	catalog, err := normalizeModelCatalog(body)
+	if err != nil {
+		return fmt.Errorf("解析模型目录: %w", err)
 	}
+	if len(catalog.Options) == 0 {
+		return errors.New("模型目录没有可用选项")
+	}
+	catalog.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	h.modelCatalogMu.Lock()
+	h.modelCatalog = catalog
+	h.modelCatalogOK = true
+	h.modelCatalogMu.Unlock()
+	return nil
+}
+
+func randomDuration(minInterval, maxInterval time.Duration) time.Duration {
+	if maxInterval <= minInterval {
+		return minInterval
+	}
+	return minInterval + time.Duration(rand.Int63n(int64(maxInterval-minInterval)))
+}
+
+func normalizeModelCatalog(body []byte) (apiModelCatalog, error) {
+	var raw upstreamModelCatalog
 	if err := json.Unmarshal(body, &raw); err != nil {
-		httpresp.Error(c, http.StatusBadGateway, "解析模型目录失败")
-		return
+		return apiModelCatalog{}, err
 	}
-	options := make([]apiModelOption, 0)
-	seen := map[string]bool{}
+
+	modelBySlug := make(map[string]struct {
+		Title                 string
+		Description           string
+		DefaultThinkingEffort string
+	})
+	effortByKey := make(map[string]struct {
+		Label       string
+		Description string
+	})
+	for _, model := range raw.Models {
+		modelBySlug[model.Slug] = struct {
+			Title                 string
+			Description           string
+			DefaultThinkingEffort string
+		}{model.Title, model.Description, model.DefaultThinkingEffort}
+		for _, effort := range model.ThinkingEfforts {
+			label := effort.ShortLabel
+			if label == "" {
+				label = effort.FullLabel
+			}
+			effortByKey[model.Slug+"\x00"+effort.ThinkingEffort] = struct {
+				Label       string
+				Description string
+			}{label, effort.Description}
+		}
+	}
+
+	catalog := apiModelCatalog{
+		Title:              raw.Title,
+		DefaultModel:       raw.DefaultModel,
+		ModelPickerVersion: raw.ModelPickerVersion,
+		Versions:           make([]apiModelVersion, 0, len(raw.Versions)),
+		Options:            make([]apiModelOption, 0),
+	}
+	flatSeen := make(map[string]bool)
 	for _, version := range raw.Versions {
-		if !version.Enabled || (version.ID != "latest" && len(options) > 0) {
+		if !version.Enabled {
 			continue
+		}
+		modelSlug := ""
+		if len(version.Slugs) > 0 {
+			modelSlug = version.Slugs[0]
+		}
+		for _, preset := range version.Presets {
+			if preset.PresetType == "available" && preset.Model != "" {
+				modelSlug = preset.Model
+				break
+			}
+		}
+		if modelSlug == "" {
+			continue
+		}
+		modelMeta := modelBySlug[modelSlug]
+		label := version.DisplayTextForIntelligence
+		if label == "" {
+			label = modelMeta.Title
+		}
+		if label == "" {
+			label = version.ID
+		}
+		shortLabel := version.ShortDisplayTextForIntelligence
+		if shortLabel == "" {
+			shortLabel = label
+		}
+		badge := ""
+		if strings.Contains(version.DisplayText, "最新") || strings.Contains(version.DisplayTextFull, "最新") {
+			badge = "最新"
+		} else if strings.Contains(version.DisplayTextFull, "传统模型") {
+			badge = "传统模型"
+		}
+		apiVersion := apiModelVersion{
+			ID:                    version.ID,
+			Label:                 label,
+			ShortLabel:            shortLabel,
+			DisplayText:           version.DisplayTextFull,
+			Tooltip:               version.Tooltip,
+			Badge:                 badge,
+			Model:                 modelSlug,
+			DefaultThinkingEffort: modelMeta.DefaultThinkingEffort,
+			Options:               make([]apiModelOption, 0, len(version.Presets)),
 		}
 		for _, preset := range version.Presets {
 			if preset.PresetType != "available" || preset.Model == "" {
 				continue
 			}
+			effortMeta := effortByKey[preset.Model+"\x00"+preset.ThinkingEffort]
+			title := preset.Title
+			if title == "" {
+				title = effortMeta.Label
+			}
+			optionLabel := preset.Label
+			if optionLabel == "" {
+				optionLabel = strings.TrimSpace(label + " " + title)
+			}
+			option := apiModelOption{
+				Label:          optionLabel,
+				Title:          title,
+				Description:    effortMeta.Description,
+				Model:          preset.Model,
+				ModelLabel:     label,
+				ThinkingEffort: preset.ThinkingEffort,
+				Lane:           preset.Lane,
+			}
+			apiVersion.Options = append(apiVersion.Options, option)
 			key := preset.Model + ":" + preset.ThinkingEffort
-			if seen[key] {
-				continue
+			if !flatSeen[key] {
+				flatSeen[key] = true
+				catalog.Options = append(catalog.Options, option)
 			}
-			seen[key] = true
-			label := preset.Label
-			if label == "" {
-				label = preset.Title
-			}
-			options = append(options, apiModelOption{Label: label, Model: preset.Model, ThinkingEffort: preset.ThinkingEffort, Lane: preset.Lane})
+		}
+		if len(apiVersion.Options) > 0 {
+			catalog.Versions = append(catalog.Versions, apiVersion)
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{"default_model": raw.DefaultModel, "options": options})
+
+	return catalog, nil
 }
 
 // Conversation handles POST /api/conversation.
@@ -611,7 +824,7 @@ func (h *ProxyHandler) doConversationWithRetry(ctx context.Context, reqBody conv
 	if reqBody.ThinkingEffort != "" {
 		thinkingEffort = reqBody.ThinkingEffort
 	}
-	if strings.Contains(model, "thinking") {
+	if reqBody.ThinkingEffort != "" || strings.Contains(model, "thinking") {
 		upstreamBody["thinking_effort"] = thinkingEffort
 	}
 	if reqBody.ConversationID != "" {

@@ -58,6 +58,9 @@ test('图片聊天保留四张候选、正确选择并追加编辑结果', async
   });
 
   await page.goto('/images');
+  await expect(page.getByText('ChatGPT 也可能会犯错。请核查重要信息。', { exact: true })).toBeVisible();
+  await expect(page.locator('.chat-input-wrapper').getByRole('button', { name: '上传文件' })).toBeVisible();
+  await expect(page.locator('.chat-input-wrapper').getByRole('combobox', { name: '选择模型' })).toBeVisible();
   const input = page.getByPlaceholder('描述图片，或继续和 ChatGPT 对话...');
   await input.fill('生成四张测试图片');
   await page.getByRole('button', { name: '发送' }).click();

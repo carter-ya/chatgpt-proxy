@@ -13,12 +13,17 @@ async function authenticate(page: Page) {
 }
 
 async function mockModels(page: Page) {
+  const instant = { label: '5.5 极速', title: '极速', model: 'gpt-5-5-instant', model_label: 'GPT-5.5' };
+  const thinking = { label: '5.6 高', title: '高', model: 'gpt-5-6-thinking', model_label: 'GPT-5.6', thinking_effort: 'extended' };
   await page.route('**/api/models', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify({ default_model: 'gpt-5-6-thinking', options: [
-      { label: '5.5 极速', model: 'gpt-5-5-instant' },
-      { label: '5.6 高', model: 'gpt-5-6-thinking', thinking_effort: 'extended' },
+      instant,
+      thinking,
+    ], versions: [
+      { id: '5.6', label: 'GPT-5.6', short_label: '5.6', model: 'gpt-5-6-thinking', default_thinking_effort: 'extended', options: [thinking] },
+      { id: '5.5', label: 'GPT-5.5', short_label: '5.5', model: 'gpt-5-5-instant', options: [instant] },
     ] }),
   }));
 }
@@ -61,8 +66,43 @@ test('进入聊天页面时每个初始化接口只请求一次', async ({ page 
 
   await page.goto('/chat/request-once');
   await expect(page.getByText('初始化完成')).toBeVisible();
+  await expect(page.getByText('ChatGPT 也可能会犯错。请核查重要信息。', { exact: true })).toBeVisible();
+  const composer = page.locator('.chat-input-wrapper');
+  await expect(composer.getByRole('button', { name: '上传文件' })).toBeVisible();
+  await expect(composer.getByRole('textbox')).toBeVisible();
+  await expect(composer.getByRole('combobox', { name: '选择模型' })).toBeVisible();
   await page.waitForTimeout(200);
   expect(requests).toEqual({ models: 1, conversations: 1, detail: 1 });
+});
+
+test('离开长对话底部后可快速返回并恢复跟随', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ items: [{ id: 'long-chat', title: '长对话', model: 'gpt-5-6-thinking', updated_at: '2026-07-16T00:00:00Z', kind: 'chat' }], total: 1 }),
+  }));
+  await page.route('**/api/conversations/long-chat', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      conversation: { id: 'long-chat', title: '长对话', model: 'gpt-5-6-thinking' },
+      messages: [{ id: 'long-answer', role: 'assistant', content: Array.from({ length: 120 }, (_, index) => `第 ${index + 1} 段长内容`).join('\n\n') }],
+    }),
+  }));
+
+  await page.goto('/chat/long-chat');
+  const messageList = page.locator('.message-list');
+  await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(80);
+
+  await messageList.evaluate((element) => { element.scrollTop = 0; });
+  const scrollButton = page.getByRole('button', { name: '滚动到底部' });
+  await expect(scrollButton).toBeVisible();
+  await scrollButton.click();
+
+  await expect(scrollButton).toBeHidden();
+  await expect.poll(() => messageList.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(80);
 });
 
 test('模型选择按账号持久化并在聊天与图片页共享', async ({ page }) => {
@@ -71,15 +111,17 @@ test('模型选择按账号持久化并在聊天与图片页共享', async ({ pa
   await mockEmptyConversations(page);
 
   await page.goto('/chat');
-  const modelSelect = page.getByRole('combobox', { name: '选择模型' });
-  await modelSelect.selectOption('gpt-5-6-thinking|extended');
+  const modelPicker = page.getByRole('combobox', { name: '选择模型' });
+  await modelPicker.click();
+  await page.locator('.model-picker-version-trigger').click();
+  await page.getByRole('menuitemradio', { name: 'GPT-5.5' }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem('chatgpt-proxy:model-preference:v1:user-e2e')))
-    .toBe('gpt-5-6-thinking|extended');
+    .toBe('gpt-5-5-instant|');
 
   await page.reload();
-  await expect(page.getByRole('combobox', { name: '选择模型' })).toHaveValue('gpt-5-6-thinking|extended');
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toContainText('5.5 极速');
   await page.goto('/images');
-  await expect(page.getByRole('combobox', { name: '选择模型' })).toHaveValue('gpt-5-6-thinking|extended');
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toContainText('5.5 极速');
 });
 
 test('已保存模型失效时回退到接口默认模型的 standard 档', async ({ page }) => {
@@ -98,7 +140,7 @@ test('已保存模型失效时回退到接口默认模型的 standard 档', asyn
   }));
 
   await page.goto('/chat');
-  await expect(page.getByRole('combobox', { name: '选择模型' })).toHaveValue('gpt-new|standard');
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toContainText('新模型 标准');
   await expect.poll(() => page.evaluate(() => localStorage.getItem('chatgpt-proxy:model-preference:v1:user-e2e')))
     .toBe('gpt-new|standard');
 });
@@ -681,7 +723,9 @@ test('生成过程中可以准备下一条消息但不能提前发送', async ({
   await textarea.press('Enter');
   await expect(textarea).toHaveValue('下一条草稿\n');
   expect(conversationBodies).toHaveLength(1);
-  await page.getByRole('combobox', { name: '选择模型' }).selectOption('gpt-5-5-instant|');
+  await page.getByRole('combobox', { name: '选择模型' }).click();
+  await page.locator('.model-picker-version-trigger').click();
+  await page.getByRole('menuitemradio', { name: 'GPT-5.5' }).click();
   await page.locator('input[type=file]').setInputFiles({
     name: 'next.txt',
     mimeType: 'text/plain',
@@ -692,7 +736,7 @@ test('生成过程中可以准备下一条消息但不能提前发送', async ({
   releaseResponse?.();
   await expect(page.getByText('第一条完成', { exact: true })).toBeVisible();
   await expect(textarea).toHaveValue('下一条草稿\n');
-  await expect(page.getByRole('combobox', { name: '选择模型' })).toHaveValue('gpt-5-5-instant|');
+  await expect(page.getByRole('combobox', { name: '选择模型' })).toContainText('5.5 极速');
   const sendButton = page.getByRole('button', { name: '发送', exact: true });
   await expect(sendButton).toBeEnabled();
   await sendButton.click();

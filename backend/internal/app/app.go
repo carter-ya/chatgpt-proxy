@@ -25,10 +25,11 @@ import (
 )
 
 type App struct {
-	cfg       *config.Config
-	engine    *gin.Engine
-	pool      *pgxpool.Pool
-	scheduler gocron.Scheduler
+	cfg          *config.Config
+	engine       *gin.Engine
+	pool         *pgxpool.Pool
+	scheduler    gocron.Scheduler
+	proxyHandler *handler.ProxyHandler
 }
 
 func New(cfg *config.Config) (*App, error) {
@@ -90,9 +91,10 @@ func New(cfg *config.Config) (*App, error) {
 	protected.DELETE("/conversations/:id", proxyHandler.DeleteConversation)
 
 	return &App{
-		cfg:    cfg,
-		engine: engine,
-		pool:   pool,
+		cfg:          cfg,
+		engine:       engine,
+		pool:         pool,
+		proxyHandler: proxyHandler,
 	}, nil
 }
 
@@ -118,6 +120,7 @@ func (a *App) Run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go a.proxyHandler.RunModelCatalogRefresh(ctx, 4*time.Minute, 8*time.Minute)
 
 	go func() {
 		<-ctx.Done()

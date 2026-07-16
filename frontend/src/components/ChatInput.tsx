@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from 'react';
-import { chat, type FileAsset, type ModelOption, type UploadedFile } from '../api/client';
+import { chat, type FileAsset, type ModelOption, type ModelVersion, type UploadedFile } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { modelOptionKey, modelPreferenceKey, resolvePreferredModel } from '../utils/modelPreference';
+import ModelPicker from './ModelPicker';
 
 interface ChatInputProps {
   onSend: (text: string, model: string, thinkingEffort: string | undefined, attachments: UploadedFile[]) => void;
@@ -37,15 +38,12 @@ interface QueuedSend {
   onSend: ChatInputProps['onSend'];
 }
 
-const fallbackModels: ModelOption[] = [
-  { label: '5.6 深入', model: 'gpt-5-6-thinking', thinking_effort: 'max', lane: 'thinking' },
-];
-
 export default function ChatInput({ onSend, sending, onCancel, placeholder = '输入消息...', referenceImage, onRemoveReference }: ChatInputProps) {
   const { user } = useAuth();
   const [text, setText] = useState('');
-  const [models, setModels] = useState<ModelOption[]>(fallbackModels);
-  const [selectedModel, setSelectedModel] = useState(modelOptionKey(fallbackModels[0]));
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [modelVersions, setModelVersions] = useState<ModelVersion[]>([]);
+  const [selectedModel, setSelectedModel] = useState('');
   const [attachments, setAttachments] = useState<AttachmentPreview[]>([]);
   const [failedUploads, setFailedUploads] = useState<FailedUpload[]>([]);
   const [activeUploads, setActiveUploads] = useState<ActiveUpload[]>([]);
@@ -63,19 +61,34 @@ export default function ChatInput({ onSend, sending, onCancel, placeholder = '�
 
   useEffect(() => {
     let cancelled = false;
-    void chat.getModels().then(({ data }) => {
-      if (cancelled || !data.options?.length) return;
-      setModels(data.options);
-      const saved = preferenceKey ? localStorage.getItem(preferenceKey) : null;
-      const preferred = resolvePreferredModel(data.options, data.default_model, saved);
-      if (!preferred) return;
-      const preferredKey = modelOptionKey(preferred);
-      setSelectedModel(preferredKey);
-      if (preferenceKey && saved !== preferredKey) {
-        localStorage.setItem(preferenceKey, preferredKey);
-      }
-    }).catch(() => undefined);
-    return () => { cancelled = true; };
+    let retryTimer: number | undefined;
+    let retryCount = 0;
+    const loadModels = () => {
+      void chat.getModels().then(({ data }) => {
+        if (cancelled || !data.options?.length) return;
+        setModels(data.options);
+        setModelVersions(data.versions || []);
+        const saved = preferenceKey ? localStorage.getItem(preferenceKey) : null;
+        const defaultEffort = data.versions
+          ?.find((version) => version.model === data.default_model)
+          ?.default_thinking_effort;
+        const preferred = resolvePreferredModel(data.options, data.default_model, saved, defaultEffort);
+        if (!preferred) return;
+        const preferredKey = modelOptionKey(preferred);
+        setSelectedModel(preferredKey);
+        if (preferenceKey && saved !== preferredKey) {
+          localStorage.setItem(preferenceKey, preferredKey);
+        }
+      }).catch(() => {
+        if (cancelled) return;
+        retryTimer = window.setTimeout(loadModels, Math.min(2000 * (2 ** retryCount++), 10000));
+      });
+    };
+    loadModels();
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
   }, [preferenceKey]);
 
   useEffect(() => { attachmentsRef.current = attachments; }, [attachments]);
@@ -309,12 +322,11 @@ export default function ChatInput({ onSend, sending, onCancel, placeholder = '�
       )}
       {uploadError && <div className="upload-error">{uploadError}</div>}
       <div className="chat-input-container">
-        <div className="composer-toolbar">
-          <select value={selectedModel} onChange={(event) => selectModel(event.target.value)} disabled={inputLocked} aria-label="选择模型">
-            {models.map((option) => <option key={modelOptionKey(option)} value={modelOptionKey(option)}>{option.label}</option>)}
-          </select>
-        </div>
+        <p className="composer-disclaimer" role="note">ChatGPT 也可能会犯错。请核查重要信息。</p>
         <div className="chat-input-wrapper">
+          <button type="button" className="upload-btn" onClick={() => fileInputRef.current?.click()} disabled={inputLocked} aria-label="上传文件">
+            <span aria-hidden="true">＋</span>
+          </button>
           <textarea
             ref={textareaRef}
             value={text}
@@ -325,7 +337,13 @@ export default function ChatInput({ onSend, sending, onCancel, placeholder = '�
             disabled={inputLocked}
             rows={1}
           />
-          <button type="button" className="upload-btn" onClick={() => fileInputRef.current?.click()} disabled={inputLocked} aria-label="上传文件">📎</button>
+          <ModelPicker
+            versions={modelVersions}
+            options={models}
+            selectedKey={selectedModel}
+            disabled={inputLocked}
+            onChange={selectModel}
+          />
           {sending ? (
             <button type="button" className="send-btn" onClick={onCancel} aria-label="停止生成">■</button>
           ) : (

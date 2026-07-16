@@ -136,9 +136,33 @@ async function createDownloadTicket(payload: Record<string, string>): Promise<vo
 
 export interface ModelOption {
   label: string;
+  title?: string;
+  description?: string;
   model: string;
+  model_label?: string;
   thinking_effort?: string;
   lane?: string;
+}
+
+export interface ModelVersion {
+  id: string;
+  label: string;
+  short_label?: string;
+  display_text?: string;
+  tooltip?: string;
+  badge?: string;
+  model: string;
+  default_thinking_effort?: string;
+  options: ModelOption[];
+}
+
+export interface ModelCatalog {
+  title?: string;
+  default_model: string;
+  model_picker_version?: number;
+  updated_at?: string;
+  versions?: ModelVersion[];
+  options: ModelOption[];
 }
 
 export interface StreamPayload {
@@ -217,7 +241,7 @@ export const chat = {
     if (!response.ok) throw new Error(`候选图片反馈失败: HTTP ${response.status} ${await response.text()}`);
   },
 
-  getModels: () => apiClient.get<{ default_model: string; options: ModelOption[] }>('/models'),
+  getModels: () => apiClient.get<ModelCatalog>('/models'),
 
   retryMessage: (
     conversationId: string,

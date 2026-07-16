@@ -57,6 +57,8 @@ export interface Conversation {
   updated_at: string;
   kind?: 'chat' | 'image';
   archived?: boolean;
+  /** ChatGPT upstream async attention state. 4 means completed and awaiting review. */
+  async_status?: number | null;
 }
 
 export interface Source {
@@ -309,6 +311,9 @@ export const chat = {
     apiClient.get<{ conversation: Conversation; messages: Message[] }>(
       `/conversations/${id}`,
     ),
+
+  acknowledgeAsyncStatus: (id: string) =>
+    apiClient.post(`/conversations/${id}/async-status`, {}),
 
   updateConversation: (id: string, data: Record<string, unknown>) =>
     apiClient.patch(`/conversations/${id}`, data),

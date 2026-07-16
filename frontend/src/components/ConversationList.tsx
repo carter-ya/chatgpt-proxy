@@ -16,6 +16,7 @@ interface ConversationListProps {
   onArchive: (conv: Conversation) => void;
   onDelete: (conv: Conversation) => void;
   onRetry: () => void;
+  errorAttentionIds: Set<string>;
 }
 
 export default function ConversationList({
@@ -32,6 +33,7 @@ export default function ConversationList({
   onArchive,
   onDelete,
   onRetry,
+  errorAttentionIds,
 }: ConversationListProps) {
   const { user, logout } = useAuth();
 
@@ -56,6 +58,11 @@ export default function ConversationList({
             className={`conversation-item ${conv.id === activeId ? 'active' : ''}`}
             onClick={() => onSelect(conv)}
           >
+            {errorAttentionIds.has(conv.id) ? (
+              <span className="conv-attention error" role="img" aria-label="任务失败" title="任务失败" />
+            ) : conv.async_status === 4 ? (
+              <span className="conv-attention" role="img" aria-label="有新回复" title="有新回复" />
+            ) : null}
             <span className="conv-title">{conv.title || '新对话'}</span>
             <span className="conv-time">{formatTime(conv.updated_at)}</span>
             <div className="conv-actions">

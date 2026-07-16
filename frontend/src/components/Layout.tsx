@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { chat, type Conversation } from '../api/client';
 import ConversationList from './ConversationList';
+import { ConversationRuntimeProvider, type ConversationKind, type TaskSettledEvent } from '../contexts/ConversationRuntimeContext';
 
 function extractConversationId(pathname: string): string | undefined {
 	const match = pathname.match(/^\/(?:chat|images)\/([^/]+)/);
@@ -33,7 +34,18 @@ export default function Layout() {
   const [showArchived, setShowArchived] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Conversation | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [errorAttentionIds, setErrorAttentionIds] = useState<Set<string>>(() => new Set());
   const conversationRequestRef = useRef(0);
+  const conversationsRef = useRef<Conversation[]>([]);
+  const asyncStatusAcknowledgementsRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+    const attentionIds = new Set(conversations.filter((item) => item.async_status === 4).map((item) => item.id));
+    asyncStatusAcknowledgementsRef.current.forEach((id) => {
+      if (!attentionIds.has(id)) asyncStatusAcknowledgementsRef.current.delete(id);
+    });
+  }, [conversations]);
 
   const loadConversations = useCallback(async () => {
     const requestID = ++conversationRequestRef.current;
@@ -63,12 +75,29 @@ export default function Layout() {
     loadConversations();
   }, [loadConversations]);
 
+  const acknowledgeAsyncStatus = useCallback((id: string) => {
+    if (asyncStatusAcknowledgementsRef.current.has(id)) return;
+    asyncStatusAcknowledgementsRef.current.add(id);
+    void chat.acknowledgeAsyncStatus(id)
+      .then(loadConversations)
+      .catch(() => asyncStatusAcknowledgementsRef.current.delete(id));
+  }, [loadConversations]);
+
   const handleSelectConversation = useCallback(
     (conv: Conversation) => {
       setSidebarOpen(false);
+      setErrorAttentionIds((current) => {
+        if (!current.has(conv.id)) return current;
+        const next = new Set(current);
+        next.delete(conv.id);
+        return next;
+      });
+      if (conv.async_status === 4) {
+        acknowledgeAsyncStatus(conv.id);
+      }
       navigate(`/${conv.kind === 'image' ? 'images' : 'chat'}/${conv.id}`, { replace: true });
     },
-    [navigate],
+    [acknowledgeAsyncStatus, navigate],
   );
 
   const handleNewChat = useCallback(() => {
@@ -112,6 +141,85 @@ export default function Layout() {
     }
   }, [showArchived]);
 
+  const requestNotificationPermission = useCallback(() => {
+    if (!('Notification' in window) || Notification.permission !== 'default') return;
+    try {
+      void Promise.resolve(Notification.requestPermission()).catch(() => undefined);
+    } catch {
+      // Notification support is optional; the sidebar attention state remains.
+    }
+  }, []);
+
+  const showTaskNotification = useCallback((event: TaskSettledEvent) => {
+    if (!event.conversationId || !('Notification' in window) || Notification.permission !== 'granted') return;
+    const conversation = conversationsRef.current.find((item) => item.id === event.conversationId);
+    const title = conversation?.title?.trim() || temporaryTitle(event.titleHint || '');
+    const body = event.outcome === 'error'
+      ? '任务失败'
+      : event.kind === 'image' ? '图片已生成' : '回复已完成';
+    try {
+      const notification = new Notification(title, {
+        body,
+        icon: '/favicon.png',
+        tag: `conversation-${event.conversationId}`,
+      });
+      notification.onclick = () => {
+        window.focus();
+        navigate(`/${event.kind === 'image' ? 'images' : 'chat'}/${event.conversationId}`, { replace: true });
+        notification.close();
+      };
+    } catch {
+      // Some browsers can still reject construction after permission was granted.
+    }
+  }, [navigate]);
+
+  const handleRuntimeConversationCreated = useCallback((id: string, message: string, kind: ConversationKind, originPath: string) => {
+    announceConversation(id, message, kind);
+    if (window.location.pathname === originPath) {
+      navigate(`/${kind === 'image' ? 'images' : 'chat'}/${id}`, { replace: true });
+    }
+    void refreshConversationTitle(id);
+  }, [announceConversation, navigate, refreshConversationTitle]);
+
+  const handleTaskSettled = useCallback((event: TaskSettledEvent) => {
+    const pageVisible = document.visibilityState === 'visible' && document.hasFocus();
+    const isCurrentConversation = Boolean(event.conversationId && event.conversationId === conversationId);
+
+    if (event.outcome === 'error' && event.conversationId && !(pageVisible && isCurrentConversation)) {
+      setErrorAttentionIds((current) => new Set(current).add(event.conversationId!));
+    }
+    if (!pageVisible) showTaskNotification(event);
+
+    if (event.outcome === 'success' && event.conversationId && pageVisible && isCurrentConversation) {
+      acknowledgeAsyncStatus(event.conversationId);
+      return;
+    }
+    void loadConversations();
+  }, [acknowledgeAsyncStatus, conversationId, loadConversations, showTaskNotification]);
+
+  useEffect(() => {
+    const reviewVisibleConversation = () => {
+      if (document.visibilityState !== 'visible' || !document.hasFocus() || !conversationId) return;
+      setErrorAttentionIds((current) => {
+        if (!current.has(conversationId)) return current;
+        const next = new Set(current);
+        next.delete(conversationId);
+        return next;
+      });
+      const conversation = conversationsRef.current.find((item) => item.id === conversationId);
+      if (conversation?.async_status === 4) {
+        acknowledgeAsyncStatus(conversationId);
+      }
+    };
+    window.addEventListener('focus', reviewVisibleConversation);
+    document.addEventListener('visibilitychange', reviewVisibleConversation);
+    reviewVisibleConversation();
+    return () => {
+      window.removeEventListener('focus', reviewVisibleConversation);
+      document.removeEventListener('visibilitychange', reviewVisibleConversation);
+    };
+  }, [acknowledgeAsyncStatus, conversationId, conversations]);
+
   const handleToggleArchived = useCallback(() => {
     // Invalidate any in-flight response before changing views. Archived
     // upstream requests can be substantially slower than the normal list.
@@ -152,6 +260,11 @@ export default function Layout() {
   }, [conversationId, deleting, loadConversations, navigate, pendingDelete]);
 
   return (
+    <ConversationRuntimeProvider
+      onTaskStarted={requestNotificationPermission}
+      onConversationCreated={handleRuntimeConversationCreated}
+      onTaskSettled={handleTaskSettled}
+    >
     <div className="layout">
       <button
         className="sidebar-toggle"
@@ -180,9 +293,10 @@ export default function Layout() {
         onArchive={handleArchive}
         onDelete={handleDelete}
         onRetry={loadConversations}
+        errorAttentionIds={errorAttentionIds}
       />
 
-      <Outlet context={{ loadConversations, announceConversation, refreshConversationTitle }} />
+      <Outlet />
 
       {pendingDelete && (
         <div className="dialog-backdrop" role="presentation">
@@ -201,5 +315,6 @@ export default function Layout() {
         </div>
       )}
     </div>
+    </ConversationRuntimeProvider>
   );
 }

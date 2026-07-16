@@ -1590,6 +1590,36 @@ func (h *ProxyHandler) GetConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, normalized)
 }
 
+// ConversationAsyncStatus acknowledges/reads ChatGPT's native asynchronous
+// conversation status. The upstream endpoint is also used by the ChatGPT web
+// client when a completed background task is reviewed.
+func (h *ProxyHandler) ConversationAsyncStatus(c *gin.Context) {
+	id := c.Param("id")
+	userID, ok := authenticatedUserID(c)
+	if !ok {
+		httpresp.Error(c, http.StatusUnauthorized, "未认证用户")
+		return
+	}
+	if !h.requireConversationOwner(c, id, userID) {
+		return
+	}
+	status, responseBody, err := h.doUpstreamRequest(
+		c.Request.Context(),
+		http.MethodPost,
+		"/backend-api/conversation/"+url.PathEscape(id)+"/async-status",
+		[]byte(`{}`),
+	)
+	if err != nil {
+		httpresp.Error(c, http.StatusBadGateway, "更新异步会话状态失败")
+		return
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		writeProxyError(c, status, responseBody, "更新异步会话状态失败")
+		return
+	}
+	c.Data(status, "application/json", responseBody)
+}
+
 func normalizeConversationDetail(body []byte, conversationID string) (gin.H, error) {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(body, &raw); err != nil {

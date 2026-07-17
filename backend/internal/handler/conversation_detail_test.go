@@ -162,3 +162,49 @@ func TestNormalizeConversationDetailExtractsImageGroups(t *testing.T) {
 		t.Fatalf("image = %#v", group.Images[0])
 	}
 }
+
+func TestNormalizeConversationDetailExtractsSafeGenUIAndSkipsHiddenMessages(t *testing.T) {
+	marker := "genuis4Oi"
+	widgetURL := "https://cdn.platform.openai.com/deployments/widgets/index.html#widget-data"
+	raw := map[string]interface{}{
+		"title": "widget", "current_node": "answer",
+		"mapping": map[string]interface{}{
+			"hidden": map[string]interface{}{
+				"parent": nil,
+				"message": map[string]interface{}{
+					"id": "hidden", "author": map[string]interface{}{"role": "assistant"},
+					"content":  map[string]interface{}{"content_type": "text", "parts": []interface{}{marker}},
+					"metadata": map[string]interface{}{"is_visually_hidden_from_conversation": true},
+				},
+			},
+			"answer": map[string]interface{}{
+				"parent": "hidden",
+				"message": map[string]interface{}{
+					"id": "answer", "author": map[string]interface{}{"role": "assistant"},
+					"content": map[string]interface{}{"content_type": "text", "parts": []interface{}{marker}},
+					"metadata": map[string]interface{}{"content_references": []interface{}{
+						map[string]interface{}{"type": "dil", "matched_text": marker, "dil_url": widgetURL, "name": "stock_chart"},
+						map[string]interface{}{"type": "dil", "matched_text": marker, "dil_url": "https://evil.example/widget#data"},
+						map[string]interface{}{"type": "dil", "matched_text": marker, "dil_url": "https://cdn.platform.openai.com:444/deployments/widgets/index.html#data"},
+					}},
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(raw)
+	result, err := normalizeConversationDetail(body, "conversation-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := result["messages"].([]apiMessage)
+	if len(messages) != 1 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	if len(messages[0].GenUIWidgets) != 1 {
+		t.Fatalf("genui widgets = %#v", messages[0].GenUIWidgets)
+	}
+	widget := messages[0].GenUIWidgets[0]
+	if widget.MatchedText != marker || widget.URL != widgetURL || widget.Name != "stock_chart" {
+		t.Fatalf("widget = %#v", widget)
+	}
+}

@@ -717,6 +717,27 @@ input, textarea {
   scrollbar-width: thin;
 }
 
+.genui-widget {
+  display: block;
+  width: 100%;
+  height: min(560px, 70vh);
+  min-height: 380px;
+  margin: 8px 0 18px;
+  border: 1px solid #4d4d5e;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.genui-fallback {
+  margin: 8px 0 18px;
+  padding: 12px 14px;
+  border: 1px solid #4d4d5e;
+  border-radius: 10px;
+  background: #202123;
+  color: #aaaab5;
+  font-size: 14px;
+}
+
 .search-image-card {
   position: relative;
   min-width: min(31%, 240px);

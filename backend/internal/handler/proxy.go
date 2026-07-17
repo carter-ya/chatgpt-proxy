@@ -124,15 +124,22 @@ type apiFileAsset struct {
 }
 
 type apiMessage struct {
-	ID          string          `json:"id"`
-	ParentID    string          `json:"parent_id,omitempty"`
-	Role        string          `json:"role"`
-	Content     string          `json:"content"`
-	Images      []apiFileAsset  `json:"images,omitempty"`
-	Attachments []apiFileAsset  `json:"attachments,omitempty"`
-	Reasoning   string          `json:"reasoning,omitempty"`
-	Sources     []apiSource     `json:"sources,omitempty"`
-	ImageGroups []apiImageGroup `json:"image_groups,omitempty"`
+	ID           string           `json:"id"`
+	ParentID     string           `json:"parent_id,omitempty"`
+	Role         string           `json:"role"`
+	Content      string           `json:"content"`
+	Images       []apiFileAsset   `json:"images,omitempty"`
+	Attachments  []apiFileAsset   `json:"attachments,omitempty"`
+	Reasoning    string           `json:"reasoning,omitempty"`
+	Sources      []apiSource      `json:"sources,omitempty"`
+	ImageGroups  []apiImageGroup  `json:"image_groups,omitempty"`
+	GenUIWidgets []apiGenUIWidget `json:"genui_widgets,omitempty"`
+}
+
+type apiGenUIWidget struct {
+	MatchedText string `json:"matched_text"`
+	URL         string `json:"url"`
+	Name        string `json:"name,omitempty"`
 }
 
 type apiImageGroup struct {
@@ -1679,6 +1686,9 @@ func normalizeConversationDetail(body []byte, conversationID string) (gin.H, err
 		metadata, _ := message["metadata"].(map[string]interface{})
 		messageID, _ := message["id"].(string)
 		parentID, _ := node["parent"].(string)
+		if metadata["is_visually_hidden_from_conversation"] == true {
+			continue
+		}
 		if model == "" {
 			model, _ = metadata["resolved_model_slug"].(string)
 		}
@@ -1715,7 +1725,7 @@ func normalizeConversationDetail(body []byte, conversationID string) (gin.H, err
 		case role == "assistant" && contentType == "text":
 			text := strings.Join(textParts, "\n")
 			if text != "" {
-				messages = append(messages, apiMessage{ID: messageID, ParentID: parentID, Role: "assistant", Content: sanitizeCitations(text), Reasoning: pendingReasoning, Sources: pendingSources, ImageGroups: imageGroupsFromMetadata(metadata)})
+				messages = append(messages, apiMessage{ID: messageID, ParentID: parentID, Role: "assistant", Content: sanitizeCitations(text), Reasoning: pendingReasoning, Sources: pendingSources, ImageGroups: imageGroupsFromMetadata(metadata), GenUIWidgets: genUIWidgetsFromMetadata(metadata)})
 				pendingReasoning = ""
 				pendingSources = nil
 			}
@@ -1740,6 +1750,36 @@ func normalizeConversationDetail(body []byte, conversationID string) (gin.H, err
 		},
 		"messages": messages,
 	}, nil
+}
+
+func genUIWidgetsFromMetadata(metadata map[string]interface{}) []apiGenUIWidget {
+	references, _ := metadata["content_references"].([]interface{})
+	widgets := make([]apiGenUIWidget, 0)
+	for _, rawReference := range references {
+		reference, _ := rawReference.(map[string]interface{})
+		if reference == nil || reference["type"] != "dil" {
+			continue
+		}
+		matchedText, _ := reference["matched_text"].(string)
+		widgetURL, _ := reference["dil_url"].(string)
+		if matchedText == "" || !isAllowedGenUIWidgetURL(widgetURL) {
+			continue
+		}
+		name, _ := reference["name"].(string)
+		widgets = append(widgets, apiGenUIWidget{MatchedText: matchedText, URL: widgetURL, Name: name})
+	}
+	return widgets
+}
+
+func isAllowedGenUIWidgetURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	return err == nil &&
+		parsed.Scheme == "https" &&
+		parsed.Host == "cdn.platform.openai.com" &&
+		parsed.User == nil &&
+		parsed.Path == "/deployments/widgets/index.html" &&
+		parsed.RawQuery == "" &&
+		parsed.Fragment != ""
 }
 
 func imageGroupsFromMetadata(metadata map[string]interface{}) []apiImageGroup {

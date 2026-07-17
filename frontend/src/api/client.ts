@@ -78,6 +78,13 @@ export interface Message {
   reasoning?: string;
   sources?: Source[];
   image_groups?: ImageGroup[];
+  genui_widgets?: GenUIWidget[];
+}
+
+export interface GenUIWidget {
+  matched_text: string;
+  url: string;
+  name?: string;
 }
 
 export interface ImageGroup {
@@ -176,6 +183,7 @@ export interface StreamPayload {
   reasoning?: string;
   sources?: Source[];
   image_groups?: ImageGroup[];
+  genui_widgets?: GenUIWidget[];
   error?: string;
 }
 

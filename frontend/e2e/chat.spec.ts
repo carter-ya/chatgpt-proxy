@@ -233,6 +233,44 @@ test('图片组与无语言代码块使用富组件渲染', async ({ page, conte
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('雨的形成过程');
 });
 
+test('GenUI 使用受限 OpenAI widget iframe 渲染并对不支持内容降级', async ({ page }) => {
+  await authenticate(page);
+  await mockModels(page);
+  const marker = 'genuis4Oi';
+  const unsupportedMarker = 'genuimissing';
+  const widgetURL = 'https://cdn.platform.openai.com/deployments/widgets/index.html#widget-data';
+  await page.route(/\/api\/conversations(?:\?.*)?$/, (route) => route.fulfill({
+    status: 200, contentType: 'application/json',
+    body: JSON.stringify({ items: [{ id: 'genui', title: '交互图表', model: 'gpt-5-6-thinking', updated_at: '2026-07-16T00:00:00Z', kind: 'chat' }], total: 1 }),
+  }));
+  await page.route('**/api/conversations/genui', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      conversation: { id: 'genui', title: '交互图表', model: 'gpt-5-6-thinking' },
+      messages: [
+        { id: 'supported', role: 'assistant', content: marker, genui_widgets: [{ matched_text: marker, url: widgetURL, name: 'stock_chart' }] },
+        { id: 'unsupported', role: 'assistant', content: unsupportedMarker },
+      ],
+    }),
+  }));
+  await page.route('https://cdn.platform.openai.com/deployments/widgets/index.html', (route) => route.fulfill({
+    status: 200,
+    contentType: 'text/html',
+    body: '<!doctype html><html><body>OpenAI widget rendered</body></html>',
+  }));
+
+  await page.goto('/chat/genui');
+  const widget = page.locator('iframe.genui-widget');
+  await expect(widget).toHaveAttribute('title', '交互内容：stock_chart');
+  await expect(widget).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
+  await expect(widget).toHaveAttribute('referrerpolicy', 'no-referrer');
+  await expect(widget.contentFrame().getByText('OpenAI widget rendered')).toBeVisible();
+  await expect(page.getByText('此交互内容暂不支持')).toBeVisible();
+  await expect(page.locator('body')).not.toContainText('genui');
+  await expect(page.locator('body')).not.toContainText('s4Oi');
+});
+
 test('助手生成文件链接通过鉴权接口下载且不跳转聊天页面', async ({ page }) => {
   await authenticate(page);
   await mockModels(page);

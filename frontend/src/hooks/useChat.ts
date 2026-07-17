@@ -1,4 +1,4 @@
-import { chat, type FileAsset, type ImageGroup, type Source, type StreamPayload, type UploadedFile } from '../api/client';
+import { chat, type FileAsset, type GenUIWidget, type ImageGroup, type Source, type StreamPayload, type UploadedFile } from '../api/client';
 import { sanitizeCitations } from '../utils/format';
 
 export interface StreamMessageParams {
@@ -18,6 +18,7 @@ export interface StreamMessageParams {
   onReasoning?: (reasoning: string) => void;
   onSources?: (sources: Source[]) => void;
   onImageGroups?: (groups: ImageGroup[]) => void;
+  onGenUIWidgets?: (widgets: GenUIWidget[]) => void;
   onMessageId?: (id: string) => void;
   onDone?: (fullMessage: string) => void;
   onError?: (error: Error) => void;
@@ -46,6 +47,7 @@ function dispatchPayload(parsed: StreamPayload, params: StreamMessageParams, con
   if (parsed.reasoning) params.onReasoning?.(parsed.reasoning);
   if (parsed.sources?.length) params.onSources?.(parsed.sources);
   if (parsed.image_groups?.length) params.onImageGroups?.(parsed.image_groups);
+  if (parsed.genui_widgets?.length) params.onGenUIWidgets?.(parsed.genui_widgets);
   if (parsed.message_id) params.onMessageId?.(parsed.message_id);
   return fullContent;
 }

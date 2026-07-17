@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { chat, type FileAsset, type ImageGroup, type Source, type UploadedFile } from '../api/client';
+import { chat, type FileAsset, type GenUIWidget, type ImageGroup, type Source, type UploadedFile } from '../api/client';
 import { streamMessage } from '../hooks/useChat';
 
 export type ConversationKind = 'chat' | 'image';
@@ -16,6 +16,7 @@ export interface RuntimeMessage {
   reasoning?: string;
   sources?: Source[];
   image_groups?: ImageGroup[];
+  genui_widgets?: GenUIWidget[];
   durationSeconds?: number;
   model?: string;
   thinkingEffort?: string;
@@ -214,6 +215,7 @@ export function ConversationRuntimeProvider({ children, onTaskStarted, onConvers
       onReasoning: (reasoning) => updateStreamingMessage((message) => ({ ...message, reasoning })),
       onSources: (sources) => updateStreamingMessage((message) => ({ ...message, sources })),
       onImageGroups: (imageGroups) => updateStreamingMessage((message) => ({ ...message, image_groups: imageGroups })),
+      onGenUIWidgets: (widgets) => updateStreamingMessage((message) => ({ ...message, genui_widgets: widgets })),
       onMessageId: (upstreamId) => updateStreamingMessage((message) => ({ ...message, upstreamId })),
       onDone: () => {
         updateStreamingMessage((message) => ({ ...message, streaming: false, status: '', durationSeconds: Math.max(1, Math.round((Date.now() - now) / 1000)) }));

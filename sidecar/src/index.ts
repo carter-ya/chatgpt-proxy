@@ -99,6 +99,12 @@ interface StreamImageGroup {
   }>;
 }
 
+interface StreamGenUIWidget {
+  matched_text: string;
+  url: string;
+  name?: string;
+}
+
 const activeStreams = new Map<string, StreamState>();
 
 interface RawStreamState {
@@ -1794,12 +1800,15 @@ function normalizeSSELine(state: StreamState, line: string): string {
   if (nextConversationId) {
     state.conversationId = nextConversationId;
   }
-  const content = extractContentDelta(state, parsed);
-  const progress = extractProgress(parsed);
-  const reasoning = extractReasoning(parsed);
-  const sources = extractSources(parsed);
-  const imageGroups = extractImageGroups(parsed);
-  const extractedImages = extractGeneratedImages(parsed);
+  const message = parsed?.message || parsed;
+  const visuallyHidden = message?.metadata?.is_visually_hidden_from_conversation === true;
+  const content = visuallyHidden ? '' : extractContentDelta(state, parsed);
+  const progress = visuallyHidden ? '' : extractProgress(parsed);
+  const reasoning = visuallyHidden ? '' : extractReasoning(parsed);
+  const sources = visuallyHidden ? [] : extractSources(parsed);
+  const imageGroups = visuallyHidden ? [] : extractImageGroups(parsed);
+  const genUIWidgets = visuallyHidden ? [] : extractGenUIWidgets(parsed);
+  const extractedImages = visuallyHidden ? [] : extractGeneratedImages(parsed);
   // Image-generation streams can expose glimpse/preview assets before the
   // async turn has finished. Only publish the turn-scoped final snapshot;
   // otherwise the UI can display a stale or replaceable image as final.
@@ -1810,7 +1819,7 @@ function normalizeSSELine(state: StreamState, line: string): string {
       : extractedImages.filter((item) => !state.imageIds.has(item.file_id));
   images.forEach((item) => state.imageIds.add(item.file_id));
 
-  if (!conversationId && !content && images.length === 0 && !progress && !reasoning && sources.length === 0 && imageGroups.length === 0) {
+  if (!conversationId && !content && images.length === 0 && !progress && !reasoning && sources.length === 0 && imageGroups.length === 0 && genUIWidgets.length === 0) {
     return '';
   }
 
@@ -1818,14 +1827,59 @@ function normalizeSSELine(state: StreamState, line: string): string {
   if (conversationId) normalized.conversation_id = conversationId;
   if (content) normalized.content = content;
   const messageId = parsed?.message?.id || parsed?.id;
-  if ((content || images.length > 0) && typeof messageId === 'string') normalized.message_id = messageId;
+  if ((content || images.length > 0 || genUIWidgets.length > 0) && typeof messageId === 'string') normalized.message_id = messageId;
   if (progress) normalized.status = progress;
   if (reasoning) normalized.reasoning = reasoning;
   if (sources.length > 0) normalized.sources = sources;
   if (imageGroups.length > 0) normalized.image_groups = imageGroups;
+  if (genUIWidgets.length > 0) normalized.genui_widgets = genUIWidgets;
   if (images.length > 0) normalized.images = images;
 
   return `data: ${JSON.stringify(normalized)}\n\n`;
+}
+
+function allowedGenUIWidgetURL(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:'
+      && url.host === 'cdn.platform.openai.com'
+      && url.pathname === '/deployments/widgets/index.html'
+      && !url.username
+      && !url.password
+      && !url.search
+      && Boolean(url.hash);
+  } catch {
+    return false;
+  }
+}
+
+function extractGenUIWidgets(parsed: any): StreamGenUIWidget[] {
+  if (Array.isArray(parsed?.genui_widgets)) {
+    return parsed.genui_widgets.flatMap((widget: any) => {
+      if (typeof widget?.matched_text !== 'string'
+        || typeof widget?.url !== 'string'
+        || !allowedGenUIWidgetURL(widget.url)) return [];
+      return [{
+        matched_text: widget.matched_text,
+        url: widget.url,
+        name: typeof widget.name === 'string' ? widget.name : undefined,
+      }];
+    });
+  }
+  const message = parsed?.message || parsed;
+  const references = message?.metadata?.content_references;
+  if (!Array.isArray(references)) return [];
+  return references.flatMap((reference: any) => {
+    if (reference?.type !== 'dil'
+      || typeof reference?.matched_text !== 'string'
+      || typeof reference?.dil_url !== 'string'
+      || !allowedGenUIWidgetURL(reference.dil_url)) return [];
+    return [{
+      matched_text: reference.matched_text,
+      url: reference.dil_url,
+      name: typeof reference.name === 'string' ? reference.name : undefined,
+    }];
+  });
 }
 
 function extractImageGroups(parsed: any): StreamImageGroup[] {
@@ -2753,6 +2807,26 @@ async function handleStreamProxy(
             return images.length > 0 ? [{ matched_text: reference.matched_text, aspect_ratio: reference.aspect_ratio, images }] : [];
           });
         };
+        const browserExtractGenUIWidgets = (message: any): StreamGenUIWidget[] => {
+          const references = message?.metadata?.content_references;
+          if (!Array.isArray(references)) return [];
+          return references.flatMap((reference: any) => {
+            if (reference?.type !== 'dil' || typeof reference?.matched_text !== 'string' || typeof reference?.dil_url !== 'string') return [];
+            try {
+              const widgetURL = new URL(reference.dil_url);
+              if (widgetURL.protocol !== 'https:'
+                || widgetURL.host !== 'cdn.platform.openai.com'
+                || widgetURL.pathname !== '/deployments/widgets/index.html'
+                || widgetURL.username
+                || widgetURL.password
+                || widgetURL.search
+                || !widgetURL.hash) return [];
+              return [{ matched_text: reference.matched_text, url: reference.dil_url, name: typeof reference.name === 'string' ? reference.name : undefined }];
+            } catch {
+              return [];
+            }
+          });
+        };
         try {
           const url = p;
           const fetchOptions: RequestInit = {
@@ -2997,7 +3071,8 @@ async function handleStreamProxy(
                     .filter((message: any) =>
                       message?.author?.role === 'assistant' &&
                       message?.content?.content_type === 'text' &&
-                      message?.metadata?.is_thinking_preamble_message !== true,
+                      message?.metadata?.is_thinking_preamble_message !== true &&
+                      message?.metadata?.is_visually_hidden_from_conversation !== true,
                     )
                     .sort(byCreateTime);
                   const latestText = textMessages.at(-1)?.content?.parts;
@@ -3007,6 +3082,7 @@ async function handleStreamProxy(
                   const latestTextMessage = textMessages.at(-1);
                   const sources = browserExtractSources(latestTextMessage || {});
                   const imageGroups = browserExtractImageGroups(latestTextMessage || {});
+                  const genUIWidgets = browserExtractGenUIWidgets(latestTextMessage || {});
                   const reasoningMessages = currentTurnMessages
                     .filter((message: any) => message?.author?.role === 'assistant' && ['thoughts', 'reasoning_recap'].includes(message?.content?.content_type))
                     .sort(byCreateTime);
@@ -3067,7 +3143,7 @@ async function handleStreamProxy(
                   if (textReady || imageReady) {
                     await win.__sidecarStreamChunk(
                       sid,
-                      `event: sidecar_final\ndata: ${JSON.stringify({ content, images, image_groups: imageGroups, reasoning, sources, message_id: latestTextMessage?.id })}\n\n`,
+                      `event: sidecar_final\ndata: ${JSON.stringify({ content, images, image_groups: imageGroups, genui_widgets: genUIWidgets, reasoning, sources, message_id: latestTextMessage?.id })}\n\n`,
                       false,
                     );
                     finalSnapshotSent = true;
